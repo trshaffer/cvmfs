@@ -624,7 +624,7 @@ int main(int argc, char *argv[]) {
       if (argc < 5)
         return 1;
       string alien_cache_dir = argv[2];
-      sanitizer::IntegerSanitizer sanitizer;
+      sanitizer::PositiveIntegerSanitizer sanitizer;
       if (!sanitizer.IsValid(argv[3]) || !sanitizer.IsValid(argv[4]))
         return 1;
       uid_t uid_owner = String2Uint64(argv[3]);
@@ -690,6 +690,15 @@ int main(int argc, char *argv[]) {
     options_manager->ParseDefault(*repository_name_);
   }
 
+#ifdef __APPLE__
+  string volname = "-ovolname=" + *repository_name_;
+  fuse_opt_add_arg(mount_options, volname.c_str());
+  // Allow for up to 5 minute "hangs" before OS X may kill cvmfs
+  fuse_opt_add_arg(mount_options, "-odaemon_timeout=300");
+  fuse_opt_add_arg(mount_options, "-onoapplexattr");
+  // Make libfuse single-threaded for the time being; see CVM-871, CVM-855
+  single_threaded_ = true;
+#endif
   if (options_manager->GetValue("CVMFS_MOUNT_RW", &parameter) &&
       options_manager->IsOn(parameter))
   {
@@ -927,6 +936,7 @@ int main(int argc, char *argv[]) {
   fuse_session_destroy(session);
   fuse_unmount(mount_point_->c_str(), channel);
   fuse_opt_free_args(mount_options);
+  delete mount_options;
   channel = NULL;
   session = NULL;
   mount_options = NULL;
@@ -938,6 +948,17 @@ int main(int argc, char *argv[]) {
            mount_point_->c_str(), repository_name_->c_str());
 
   CleanupLibcryptoMt();
+
+  delete loader_exports_;
+  delete config_files_;
+  delete repository_name_;
+  delete mount_point_;
+  delete socket_path_;
+  loader_exports_ = NULL;
+  config_files_ = NULL;
+  repository_name_ = NULL;
+  mount_point_ = NULL;
+  socket_path_ = NULL;
 
   if (retval != 0)
     return kFailFuseLoop;

@@ -39,6 +39,7 @@ CVMFS_OPT_TEST_TYPE=${CVMFS_OPT_TEST_TYPE:=callgrind} # callgrind / memcheck
 CVMFS_OPT_CONFIG_FILE=${CVMFS_OPT_CONFIG_FILE:=}
 CVMFS_OPT_OUTPUT_DIR=${CVMFS_OPT_OUTPUT_DIR:=/tmp/cvmfs_benchmarks}
 CVMFS_OPT_CACHEDIR=${CVMFS_OPT_CACHEDIR:=/var/lib/cvmfs/benchmark}
+CVMFS_OPT_PARALLEL_RUNS=${CVMFS_OPT_PARALLEL_RUNS:=1}
 CVMFS_OPT_MTAB_MODIFIED="false"
 
 
@@ -229,7 +230,7 @@ cvmfs_clean() {
   sudo sh -c "rm -f /etc/cvmfs/config.d/*"
   sudo sh -c "cat /dev/null > $CVMFS_TEST_SYSLOG_TARGET"
 
-  timeout=60
+  local timeout=60
   while $(pgrep -u cvmfs cvmfs2 > /dev/null); do
     if [ $timeout -eq 0 ]; then
       return 101
@@ -270,17 +271,27 @@ cvmfs_mount() {
 
 
 cvmfs_umount() {
-  repositories=$1
-
+  local repositories=$1
+  local times=5
+  local result=-1
+  
   for r in $(echo $repositories | tr , " "); do
-    sudo umount /cvmfs/$r
-    local result=$?
+    while (( result != 0 && times > 0  )); do
+      sudo umount /cvmfs/$r > /dev/null 2>&1
+      result=$?
+      times=$(( $times - 1 ))
+      if [ $result -ne 0 ] && [ $times -gt 0 ]; then
+        echo "Failed to umount. Trying again..."
+        sleep 1
+      fi
+    done
+    
     if [ $result -ne 0 ]; then
       lsof /cvmfs/$r
       return 200
     fi
 
-    timeout=5
+    local timeout=5
     while cat /proc/mounts | grep -q " /cvmfs/$r "; do
       if [ $timeout -eq 0 ]; then
         return 101
@@ -300,10 +311,9 @@ has_selinux() {
 
 
 get_cvmfs_cachedir() {
-  repository=$1
+  local repository=$1
 
-  local cache_dir
-  cache_dir=$(cvmfs_config showconfig $repository | grep CVMFS_CACHE_DIR | awk '{print $1}' | cut -d= -f2)
+  local cache_dir=$(cvmfs_config showconfig $repository | grep CVMFS_CACHE_DIR | awk '{print $1}' | cut -d= -f2)
   if [ "x$cache_dir" = "x" ]; then
     echo "Failed to figure out cache directory"
     exit 1
@@ -353,11 +363,11 @@ reset_test_warning_flags() {
 
 
 check_time() {
-  start_time=$1
-  end_time=$2
-  limit=$3
+  local start_time=$1
+  local end_time=$2
+  local limit=$3
 
-  diff_time=$(($end_time-$start_time))
+  local diff_time=$(($end_time-$start_time))
 
   if [ $diff_time -gt $limit ]; then
     echo "Time limit exceeded" >&2
@@ -371,12 +381,12 @@ check_time() {
 
 
 check_memory() {
-  instance=$1
-  limit=$2
+  local instance=$1
+  local limit=$2
 
-  pid=$(attr -qg pid /cvmfs/$instance)             || return 100
-  rss="$(sudo cat /proc/$pid/status | grep VmRSS)" || return 101
-  rss_kb=$(echo $rss | awk '{print $2}')
+  local pid=$(attr -qg pid /cvmfs/$instance)             || return 100
+  local rss="$(sudo cat /proc/$pid/status | grep VmRSS)" || return 101
+  local rss_kb=$(echo $rss | awk '{print $2}')
 
   if [ $rss_kb -gt $limit ]; then
     local inode_tracker="$(sudo cvmfs_talk -i $instance internal affairs | grep 'inode tracker')"
@@ -411,6 +421,18 @@ destroy_repo() {
 has_repo() {
   local repo=$1
   cvmfs_server list 2>/dev/null | grep -q "^$repo "
+}
+
+
+apply_server_cache_config() {
+  local repo=$1
+  local client_conf="/etc/cvmfs/repositories.d/${repo}/client.conf"
+  [ x"$CVMFS_TEST_SERVER_CACHE" != x"" ] || return 0
+
+  local cache_base=$(echo "$CVMFS_TEST_SERVER_CACHE" | sed 's/\//\\\//g')
+  # will take effect _after_ the first publish operation...
+  sudo sed -i "s/^\(CVMFS_CACHE_BASE\)=.*\$/\1=${cache_base}/"     $client_conf || return 1
+  sudo sed -i "s/^\(CVMFS_RELOAD_SOCKETS\)=.*\$/\1=${cache_base}/" $client_conf || return 2
 }
 
 
@@ -453,13 +475,7 @@ create_repo() {
                          $extra_options $repo || return 102
 
   local client_conf="/etc/cvmfs/repositories.d/${repo}/client.conf"
-
-  if [ x"$CVMFS_TEST_SERVER_CACHE" != x"" ]; then
-    local cache_base=$(echo "$CVMFS_TEST_SERVER_CACHE" | sed 's/\//\\\//g')
-    # will take effect _after_ the first publish operation...
-    sudo sed -i "s/^CVMFS_CACHE_BASE=.*\$/CVMFS_CACHE_BASE=${cache_base}/"         $client_conf
-    sudo sed -i "s/^CVMFS_RELOAD_SOCKETS=.*\$/CVMFS_RELOAD_SOCKETS=${cache_base}/" $client_conf
-  fi
+  apply_server_cache_config $repo || return 103
 
   if [ x$debug_log != x -a x$debug_log != xNO ]; then
     echo "CVMFS_DEBUGLOG=$debug_log" | sudo tee -a $client_conf
@@ -816,7 +832,7 @@ publish_repo() {
   shift 1
 
   # parse the command line arguments (keep quotation marks)
-  args="-v"
+  local args="-v"
   while [ $# -gt 0 ]; do
     if echo "$1" | grep -q "[[:space:]]"; then
       args="$args \"$1\""
@@ -1333,15 +1349,25 @@ EOF
 
 }
 
+clean_benchmark_cache() {
+  local cachedir="${CVMFS_OPT_CACHEDIR}/${FQRN}"
+  if [ -d "$cachedir" ] && [ "x$cachedir" != x ]; then
+  list=$(ls '$cachedir' | grep -P "^[0-9a-f]{2}$")
+    for dir in $list; do
+      rm -f "$cachedir/$dir"/*
+    done
+  fi
+}
 
 # sets the valgrind options depending on the test type
 #
 # @param test_type  concrete test to execute
 set_valgrind_options() {
+  local option="$1"
   local CVMFS_OPT_CALLGRIND="--tool=callgrind --dump-before=fuse_session_loop_mt --dump-after=fuse_session_loop_mt --dsymutil=yes --log-file=${FQRN}.callgrind.log -v"
   local CVMFS_OPT_MEMCHECK="--tool=memcheck --xml=yes --xml-file=${FQRN}.memcheck.xml --trace-children=yes --child-silent-after-fork=yes --leak-check=yes --log-file=${FQRN}.memcheck.log -v"
   OPTIONS=""
-  case $CVMFS_OPT_TEST_TYPE in
+  case $option in
     callgrind)
       OPTIONS=$CVMFS_OPT_CALLGRIND
     ;;
@@ -1362,10 +1388,7 @@ setup_benchmark_environment() {
   mkdir -p $workspace/cache
 
   # cleaning the cache
-  local cachedir="${CVMFS_OPT_CACHEDIR}/${FQRN}"
-  if [ -d "$cachedir" ] && [ "x$cachedir" != x ]; then
-    rm -rf $cachedir/*
-  fi
+  clean_benchmark_cache
 
   # mtab trick
   if [ ! -h /etc/mtab ]; then
@@ -1378,14 +1401,12 @@ setup_benchmark_environment() {
   if [ ! -d "$CVMFS_OPT_CACHEDIR" ]; then
     mkdir -p "$CVMFS_OPT_CACHEDIR"
     has_selinux
-    selinux=$?
+    local selinux=$?
     if [ "$selinux" -eq 0 ]; then
       chcon -Rv --type=cvmfs_cache_t $CVMFS_OPT_CACHEDIR
     fi
   else
-    if [ x"$CVMFS_OPT_CACHEDIR" != x ]; then
-      rm -rf "$CVMFS_OPT_CACHEDIR"/*
-    fi
+    clean_benchmark_cache
   fi
 
   # create a cvmfs.conf file or use a custom one
@@ -1421,10 +1442,13 @@ EOF
 
 }
 
+
 # creates a statistics file
 create_statistics_file() {
   local iteration=$1
   local total_time=$2
+  local memory_median=$3
+  local memory_max=$4
   local statistics_file="${FQRN}_${iteration}.data"
   benchmark_log "creating the statistics file ${statistics_file} calling cvmfs_talk"
   cat >$statistics_file << EOF
@@ -1437,6 +1461,36 @@ EOF
   benchmark_log "Executing cvmfs_talk"
   cvmfs_talk -p "$CVMFS_OPT_CACHEDIR"/$FQRN/cvmfs_io.$FQRN internal affairs | grep \| | tail -n +2 >> $statistics_file
   echo "global.sz_total_time|$total_time|Total execution time (seconds)" >> $statistics_file # of only one iteration without valgrind!
+  echo "global.sz_memory_median|$memory_median|Median memory consumption (KB)" >> $statistics_file
+  echo "global.sz_memory_max|$memory_max|Maximum memory consumption (KB)" >> $statistics_file
+}
+
+
+# collects data during the run
+statistics_daemon() {
+  local dump_file=$1
+  local PID=$2
+  touch $dump_file
+  while [ -f /proc/${PID}/smaps ]; do
+    # memory in KB
+    echo 0 $(awk '/Rss/ {print "+", $2}' /proc/${PID}/smaps) | bc >> $dump_file
+    sleep 2
+  done
+}
+
+
+# collects the median of a file
+collect_median() {
+  local file=$1
+  local num_lines=$(cat $file | wc -l)
+  local median_pos=$(( num_lines / 2 ))
+  echo $(sort $file | sed "${median_pos}q;d")
+}
+
+
+# collects the maximum of a file
+collect_maximum() {
+  echo $(sort $1 | tail -n 1)
 }
 
 
@@ -1445,17 +1499,41 @@ execute_statistics_loop() {
   local code=0
   local iteration=1
   local PID=0
+  local processes=()
+  local memory_file="memory.stat"
 
   while (( iteration <= $CVMFS_OPT_ITERATIONS && code == 0 )); do
     local start_time=$(date +%s)
+    # cleaning the cache if necessary before executing the actual benchmark
+    if [ x"$CVMFS_OPT_WARM_CACHE" != x"yes" ]; then
+      clean_benchmark_cache
+    fi
+    
     cvmfs2 -f -o config=cvmfs.conf,disable_watchdog,simple_options_parsing $FQRN /cvmfs/$FQRN 2>&1 &
     PID=$!
     wait_fqrn_mount
-    ( cvmfs_run_benchmark )
-    code=$?
+    statistics_daemon $memory_file $PID >/dev/null 2>&1 & # it kills himself when there is no cvmfs process
+
+    for i in $(seq 1 1 $CVMFS_OPT_PARALLEL_RUNS); do
+      ( cvmfs_run_benchmark ) > /tmp/$FQRN.log.$i 2>&1 &
+      processes[$i]=$!
+    done
+
+    for pid in ${processes[@]}; do
+      wait $pid
+      local retval=$?
+      if [ $retval -ne 0 ]; then
+        code=$retval
+        echo "One thread failed in $FQRN. Check /tmp/$FQRN.log"
+      fi
+    done
+
     local end_time=$(date +%s)
     local total_time=$(( end_time - start_time )) # in seconds
-    create_statistics_file $iteration $total_time
+
+    local memory_median=$(collect_median $memory_file)
+    local memory_max=$(collect_maximum $memory_file)
+    create_statistics_file $iteration $total_time $memory_median $memory_max
     cvmfs_umount $FQRN
     wait $PID
     iteration=$(( iteration + 1 ))
@@ -1475,32 +1553,49 @@ execute_benchmark_loop() {
   local iteration=1
   local code=0
   local count=$CVMFS_OPT_ITERATIONS
+  
+  valgrind $OPTIONS cvmfs2 -f -o config=cvmfs.conf,disable_watchdog,simple_options_parsing $FQRN /cvmfs/$FQRN &
+  PID=$!
+  wait_fqrn_mount
 
   while (( count > 0 && code == 0 )); do
+    # cleaning the cache if necessary before executing the actual benchmark
+    if [ x"$CVMFS_OPT_WARM_CACHE" != x"yes" ]; then
+      clean_benchmark_cache
+    fi
     benchmark_log "Starting iteration ${iteration}"
     ( cvmfs_run_benchmark )
     code=$?
     count=$(( count - 1 ))
     iteration=$(( iteration + 1 ))
   done
+  
+  create_info_file
 
   if [ "$code" -ne 0 ]; then
     benchmark_log "Problem executing the tests. Aborting"
     benchmark_log $(lsof /cvmfs/${FQRN})
     exit 100
   fi
+  
+  benchmark_log "Iterations finished. Unmounting cvmfs"
+  cvmfs_umount $FQRN
+  wait $PID
 }
 
 
 # runs a benchmark $CVMFS_OPT_ITERATIONS times
 run_benchmark() {
   local statistics_file="$FQRN.data"
-  set_valgrind_options
 
   # use or not warm cache
   if [ x"$CVMFS_OPT_WARM_CACHE" = x"yes" ]; then
     benchmark_log "Starting initial execution"
     single_execution
+    local code=$?
+    if [ $code -ne 0 ]; then
+      die "Failed in the warm cache execution"
+    fi
   else
     benchmark_log "Using cold cache"
   fi
@@ -1509,20 +1604,24 @@ run_benchmark() {
   if [ x"$CVMFS_OPT_TALK_STATISTICS" = x"yes" ]; then
     benchmark_log "Executing the statistics collection"
     execute_statistics_loop
+    local code=$?
+    if [ $code -ne 0 ]; then
+      die "Failed in the statistics collection"
+    fi
   fi
 
   if [ x"$CVMFS_OPT_VALGRIND" = x"yes" ]; then
-    benchmark_log "Starting loading the profiler and mounting in /cvmfs/${FQRN}"
-    benchmark_log "Running valgrind with the following parameters: $OPTIONS"
-    benchmark_log "Launching the job $CVMFS_OPT_ITERATIONS times"
-    valgrind $OPTIONS cvmfs2 -f -o config=cvmfs.conf,disable_watchdog,simple_options_parsing $FQRN /cvmfs/$FQRN &
-    PID=$!
-    wait_fqrn_mount
-    execute_benchmark_loop
-    create_info_file
-    benchmark_log "Iterations finished. Unmounting cvmfs"
-    cvmfs_umount $FQRN
-    wait $PID
+    for tool in $CVMFS_OPT_TEST_TYPE; do
+      set_valgrind_options $tool
+      benchmark_log "Starting loading the profiler and mounting in /cvmfs/${FQRN}"
+      benchmark_log "Running valgrind with the following parameters: $OPTIONS"
+      benchmark_log "Launching the job $CVMFS_OPT_ITERATIONS times"
+      execute_benchmark_loop
+      local code=$?
+      if [ $code -ne 0 ]; then
+        die "Failed in Valgrind"
+      fi
+    done
   fi
 }
 

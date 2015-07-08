@@ -160,8 +160,8 @@ struct cvmfs_global_options : public cvmfs_globals::options {
       return LIBCVMFS_FAIL_BADOPT;
     if (logfile != "")
       log_file = logfile;
-    
-    if ((cachedir != "") && (cache_directory != "") && 
+
+    if ((cachedir != "") && (cache_directory != "") &&
         (cache_directory != cachedir))
     {
       return LIBCVMFS_FAIL_BADOPT;
@@ -449,6 +449,23 @@ int cvmfs_open(cvmfs_context *ctx, const char *path) {
   }
   return rc;
 }
+
+
+ssize_t cvmfs_pread(
+  cvmfs_context *ctx,
+  int fd,
+  void *buf,
+  size_t size,
+  off_t off)
+{
+  ssize_t nbytes = ctx->Pread(fd, buf, size, off);
+  if (nbytes < 0) {
+    errno = -nbytes;
+    return -1;
+  }
+  return nbytes;
+}
+
 
 int cvmfs_close(cvmfs_context *ctx, int fd)
 {
