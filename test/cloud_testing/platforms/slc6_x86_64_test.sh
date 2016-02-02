@@ -75,8 +75,10 @@ CVMFS_TEST_CLASS_NAME=ServerIntegrationTests                                  \
                                  src/524-corruptmanifestfailover              \
                                  src/577-garbagecollecthiddenstratum1revision \
                                  src/579-garbagecollectstratum1legacytag      \
+                                 src/585-xattrs                               \
                                  --                                           \
                                  src/5*                                       \
+                                 src/6*                                       \
                               || retval=1
 
 
@@ -88,7 +90,7 @@ echo "done ($fakes3_pid)"
 if [ $s3_retval -eq 0 ]; then
   echo "running CernVM-FS server test cases against FakeS3..."
   CVMFS_TEST_S3_CONFIG=$FAKE_S3_CONFIG                                      \
-  CVMFS_TEST_STRATUM0=$FAKE_S3_URL                                          \
+  CVMFS_TEST_HTTP_BASE=$FAKE_S3_URL                                         \
   CVMFS_TEST_SERVER_CACHE='/srv/cache'                                      \
   CVMFS_TEST_CLASS_NAME=S3ServerIntegrationTests                            \
   ./run.sh $TEST_S3_LOGFILE -o ${TEST_S3_LOGFILE}${XUNIT_OUTPUT_SUFFIX}     \
@@ -112,8 +114,22 @@ if [ $s3_retval -eq 0 ]; then
                                src/577-garbagecollecthiddenstratum1revision \
                                src/579-garbagecollectstratum1legacytag      \
                                src/583-httpredirects                        \
+                               src/585-xattrs                               \
+                               src/591-importrepo                           \
+                               src/594-backendoverwrite                     \
+                               src/595-geoipdbupdate                        \
+                               src/600-securecvmfs                          \
+                               src/605-resurrectancientcatalog              \
+                               src/607-noapache                             \
+                               src/608-infofile                             \
+                               src/610-altpath                              \
+                               src/614-geoservice                           \
+                               src/622-gracefulrmfs                         \
+                               src/626-cacheexpiry                          \
                                --                                           \
-                               src/5* || retval=1
+                               src/5*                                       \
+                               src/6*                                       \
+                               || retval=1
 
   echo -n "killing FakeS3... "
   sudo kill -2 $fakes3_pid && echo "done" || echo "fail"

@@ -37,6 +37,12 @@ guess_package_url() {
       package_file_name="${package_name}-${cvmfs_version_string}.el${slc_major_version}.${architecture}.rpm"
     fi
 
+  # CentOS 7
+  elif [ x$(lsb_release --id --short 2>/dev/null) = x"CentOS" ]; then
+    local slc_major_version=$(lsb_release --description --short | sed 's/^.* \([0-9][0-9]*\)\.[0-9\.][0-9\.]* .*$/\1/')
+    local architecture=$(uname -m)
+    package_file_name="${package_name}-${cvmfs_version_string}.el${slc_major_version}.centos.${architecture}.rpm"
+
   # to be extended
   else
     return 2
@@ -120,7 +126,7 @@ package_version() {
 get_providing_packages() {
   local virt_pkg_name=$1
 
-  if has_binary yum; then
+  if has_binary rpm; then
     rpm -q --whatprovides $virt_pkg_name
   elif has_binary dpkg; then
     dpkg -l | grep $virt_pkg_name | awk '{print $2}'
@@ -133,8 +139,8 @@ get_providing_packages() {
 installed_package_version() {
   local pkg_name=$1
 
-  if has_binary yum; then
-    yum info $pkg_name 2>/dev/null | grep -e "^Version" | sed 's/Version.*: \(.*\)$/\1/'
+  if has_binary rpm; then
+    echo $(rpm -qa --queryformat '%{version}' yum)
   elif has_binary dpkg; then
     dpkg --status $pkg_name 2>/dev/null | grep -e "^Version:" | sed 's/^Version: \([0-9]\.[0-9]\.[0-9]*\).*$/\1/'
   else
@@ -146,7 +152,9 @@ installed_package_version() {
 is_installed() {
   local pkg_name=$1
 
-  if has_binary yum; then
+  if has_binary dnf; then
+    dnf info $pkg_name > /dev/null
+  elif has_binary yum; then
     yum info $pkg_name > /dev/null
   elif has_binary dpkg; then
     dpkg --status $pkg_name > /dev/null
@@ -159,6 +167,12 @@ is_installed() {
 yum_install_packages() {
   local pkg_paths="$1"
   sudo yum -y install --nogpgcheck $pkg_paths
+}
+
+
+dnf_install_packages() {
+  local pkg_paths="$1"
+  sudo dnf -y install --nogpgcheck $pkg_paths
 }
 
 
@@ -199,7 +213,9 @@ yum_update_fallback() {
 install_packages() {
   local pkg_paths="$1"
 
-  if has_binary yum; then
+  if has_binary dnf; then
+    dnf_install_packages "$pkg_paths"
+  elif has_binary yum; then
     if version_lower_or_equal $(installed_package_version 'yum') '3.2.22'; then
       yum_update_fallback "$pkg_paths"
     else
@@ -217,7 +233,9 @@ install_packages() {
 uninstall_package() {
   local pkg_names="$1"
 
-  if has_binary yum; then
+  if has_binary dnf; then
+    sudo dnf -y erase $pkg_names
+  elif has_binary yum; then
     sudo yum -y erase $pkg_names
   elif has_binary apt-get; then
     sudo apt-get --assume-yes purge $pkg_names

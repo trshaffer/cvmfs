@@ -25,7 +25,7 @@ class T_Download : public ::testing::Test {
   virtual void SetUp() {
     download_mgr.Init(8, false, /* use_system_proxy */
         &statistics);
-    ffoo = CreateTempFile("/tmp/cvmfstest", 0600, "w+", &foo_path);
+    ffoo = CreateTemporaryFile(&foo_path);
     assert(ffoo);
     foo_url = "file://" + foo_path;
   }
@@ -34,6 +34,11 @@ class T_Download : public ::testing::Test {
     download_mgr.Fini();
     fclose(ffoo);
     unlink(foo_path.c_str());
+  }
+
+  FILE *CreateTemporaryFile(std::string *path) const {
+    return CreateTempFile(GetCurrentWorkingDirectory() + "/cvmfs_ut_download",
+                          0600, "w+", path);
   }
 
   perf::Statistics statistics;
@@ -47,7 +52,7 @@ class T_Download : public ::testing::Test {
 class TestSink : public cvmfs::Sink {
  public:
   TestSink() {
-    FILE *f = CreateTempFile("/tmp/cvmfstest", 0600, "w+", &path);
+    FILE *f = CreateTempFile("./cvmfs_ut_download", 0600, "w+", &path);
     assert(f);
     fd = dup(fileno(f));
     assert(f >= 0);
@@ -77,10 +82,9 @@ class TestSink : public cvmfs::Sink {
 //------------------------------------------------------------------------------
 
 
-// A placeholder test for future unit testing of the download module
 TEST_F(T_Download, File) {
   string dest_path;
-  FILE *fdest = CreateTempFile("/tmp/cvmfstest", 0600, "w+", &dest_path);
+  FILE *fdest = CreateTemporaryFile(&dest_path);
   ASSERT_TRUE(fdest != NULL);
   UnlinkGuard unlink_guard(dest_path);
 
@@ -92,9 +96,31 @@ TEST_F(T_Download, File) {
 }
 
 
+TEST_F(T_Download, Multiple) {
+  string dest_path;
+  FILE *fdest = CreateTemporaryFile(&dest_path);
+  ASSERT_TRUE(fdest != NULL);
+  UnlinkGuard unlink_guard(dest_path);
+
+  DownloadManager second_mgr;
+  second_mgr.Init(8, false, /* use_system_proxy */ &statistics, "second");
+
+  JobInfo info(&foo_url, false /* compressed */, false /* probe hosts */,
+               fdest,  NULL);
+  JobInfo info2(&foo_url, false /* compressed */, false /* probe hosts */,
+                fdest,  NULL);
+  download_mgr.Fetch(&info);
+  second_mgr.Fetch(&info2);
+  EXPECT_EQ(info.error_code, kFailOk);
+  EXPECT_EQ(info2.error_code, kFailOk);
+  fclose(fdest);
+  second_mgr.Fini();
+}
+
+
 TEST_F(T_Download, LocalFile2Mem) {
   string dest_path;
-  FILE *fdest = CreateTempFile("/tmp/cvmfstest", 0600, "w+", &dest_path);
+  FILE *fdest = CreateTemporaryFile(&dest_path);
   ASSERT_TRUE(fdest != NULL);
   UnlinkGuard unlink_guard(dest_path);
   char buf = '1';
@@ -112,7 +138,7 @@ TEST_F(T_Download, LocalFile2Mem) {
 
 TEST_F(T_Download, LocalFile2Sink) {
   string dest_path;
-  FILE *fdest = CreateTempFile("/tmp/cvmfstest", 0600, "w+", &dest_path);
+  FILE *fdest = CreateTemporaryFile(&dest_path);
   ASSERT_TRUE(fdest != NULL);
   UnlinkGuard unlink_guard(dest_path);
   char buf = '1';
@@ -231,6 +257,21 @@ TEST_F(T_Download, ValidateGeoReply) {
   EXPECT_EQ(geo_order[1], 2U);
   EXPECT_EQ(geo_order[2], 0U);
   EXPECT_EQ(geo_order[3], 1U);
+}
+
+
+TEST_F(T_Download, ParseHttpCode) {
+  char digits[3];
+  digits[0] = '0';  digits[1] = '0';  digits[2] = 'a';
+  EXPECT_EQ(-1, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '0';  digits[1] = '0';  digits[2] = '0';
+  EXPECT_EQ(0, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '0';  digits[1] = '0';  digits[2] = '1';
+  EXPECT_EQ(1, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '1';  digits[1] = '0';  digits[2] = '1';
+  EXPECT_EQ(101, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '9';  digits[1] = '9';  digits[2] = '9';
+  EXPECT_EQ(999, DownloadManager::ParseHttpCode(digits));
 }
 
 }  // namespace download

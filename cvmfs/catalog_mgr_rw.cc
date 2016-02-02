@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "catalog_balancer.h"
 #include "catalog_rw.h"
 #include "logging.h"
 #include "manifest.h"
@@ -33,11 +34,18 @@ WritableCatalogManager::WritableCatalogManager(
   upload::Spooler           *spooler,
   download::DownloadManager *download_manager,
   const uint64_t             catalog_entry_warn_threshold,
-  perf::Statistics          *statistics)
+  perf::Statistics          *statistics,
+  bool                       is_balanceable,
+  unsigned                   max_weight,
+  unsigned                   min_weight)
   : SimpleCatalogManager(base_hash, stratum0, dir_temp, download_manager,
       statistics)
   , spooler_(spooler)
   , catalog_entry_warn_threshold_(catalog_entry_warn_threshold)
+  , is_balanceable_(is_balanceable)
+  , max_weight_(max_weight)
+  , min_weight_(min_weight)
+  , balance_weight_(max_weight / 2)
 {
   sync_lock_ =
     reinterpret_cast<pthread_mutex_t *>(smalloc(sizeof(pthread_mutex_t)));
@@ -84,10 +92,10 @@ void WritableCatalogManager::ActivateCatalog(Catalog *catalog) {
  * @return true on success, false otherwise
  */
 manifest::Manifest *WritableCatalogManager::CreateRepository(
-  const string     &dir_temp,
-  const bool        volatile_content,
-  const bool        garbage_collectable,
-  upload::Spooler  *spooler)
+  const string      &dir_temp,
+  const bool         volatile_content,
+  const std::string &voms_authz,
+  upload::Spooler   *spooler)
 {
   // Create a new root catalog at file_path
   string file_path = dir_temp + "/new_root_catalog";
@@ -113,8 +121,9 @@ manifest::Manifest *WritableCatalogManager::CreateRepository(
     UniquePtr<CatalogDatabase> new_clg_db(CatalogDatabase::Create(file_path));
     if (!new_clg_db.IsValid() ||
         !new_clg_db->InsertInitialValues(root_path,
-                                          volatile_content,
-                                          root_entry))
+                                         volatile_content,
+                                         voms_authz,
+                                         root_entry))
     {
       LogCvmfs(kLogCatalog, kLogStderr, "creation of catalog '%s' failed",
                file_path.c_str());
@@ -144,7 +153,9 @@ manifest::Manifest *WritableCatalogManager::CreateRepository(
   const string manifest_path = dir_temp + "/manifest";
   manifest::Manifest *manifest =
     new manifest::Manifest(hash_catalog, catalog_size, "");
-  manifest->set_garbage_collectability(garbage_collectable);
+  if (!voms_authz.empty()) {
+    manifest->set_has_alt_catalog_path(true);
+  }
 
   // Upload catalog
   spooler->Upload(file_path_compressed, "data/" + hash_catalog.MakePath());
@@ -174,7 +185,8 @@ bool WritableCatalogManager::FindCatalog(const string &path,
                                          WritableCatalog **result)
 {
   Catalog *best_fit =
-    AbstractCatalogManager::FindCatalog(PathString(path.data(), path.length()));
+    AbstractCatalogManager<Catalog>::FindCatalog(PathString(path.data(),
+                                                            path.length()));
   assert(best_fit != NULL);
   Catalog *catalog = NULL;
   bool retval = MountSubtree(PathString(path.data(), path.length()),
@@ -335,6 +347,7 @@ void WritableCatalogManager::AddFile(
   }
 
   assert(!entry.IsRegular() || !entry.checksum().IsNull());
+  assert(entry.IsRegular() || !entry.IsExternalFile());
   catalog->AddEntry(entry, xattrs, file_path, parent_path);
   SyncUnlock();
 }
@@ -545,8 +558,11 @@ void WritableCatalogManager::CreateNestedCatalog(const std::string &mountpoint)
   const bool volatile_content = false;
   CatalogDatabase *new_catalog_db = CatalogDatabase::Create(database_file_path);
   assert(NULL != new_catalog_db);
+  // Note we do not set the external_data bit for nested catalogs
   retval = new_catalog_db->InsertInitialValues(nested_root_path,
                                                volatile_content,
+                                               "",  // At this point, only root
+                                                    // catalog gets VOMS authz
                                                new_root_entry);
   assert(retval);
   // TODO(rmeusel): we need a way to attach a catalog directy from an open
@@ -666,10 +682,26 @@ void WritableCatalogManager::PrecalculateListings() {
 }
 
 
-manifest::Manifest *WritableCatalogManager::Commit(
-  const bool     stop_for_tweaks,
-  const uint64_t manual_revision)
-{
+void WritableCatalogManager::SetTTL(const uint64_t new_ttl) {
+  SyncLock();
+  reinterpret_cast<WritableCatalog *>(GetRootCatalog())->SetTTL(new_ttl);
+  SyncUnlock();
+}
+
+
+bool WritableCatalogManager::SetVOMSAuthz(const std::string &voms_authz) {
+  bool result;
+  SyncLock();
+  result = reinterpret_cast<WritableCatalog *>(
+    GetRootCatalog())->SetVOMSAuthz(voms_authz);
+  SyncUnlock();
+  return result;
+}
+
+
+bool WritableCatalogManager::Commit(const bool           stop_for_tweaks,
+                                    const uint64_t       manual_revision,
+                                    manifest::Manifest  *manifest) {
   reinterpret_cast<WritableCatalog *>(GetRootCatalog())->SetDirty();
   WritableCatalogList catalogs_to_snapshot;
   GetModifiedCatalogs(&catalogs_to_snapshot);
@@ -677,7 +709,6 @@ manifest::Manifest *WritableCatalogManager::Commit(
   spooler_->RegisterListener(
     &WritableCatalogManager::CatalogUploadCallback, this);
 
-  manifest::Manifest *result = NULL;
   for (WritableCatalogList::iterator i = catalogs_to_snapshot.begin(),
        iEnd = catalogs_to_snapshot.end(); i != iEnd; ++i)
   {
@@ -719,23 +750,24 @@ manifest::Manifest *WritableCatalogManager::Commit(
       spooler_->WaitForUpload();
       if (spooler_->GetNumberOfErrors() > 0) {
         LogCvmfs(kLogCatalog, kLogStderr, "failed to commit catalogs");
-        return NULL;
+        return false;
       }
 
       // .cvmfspublished
       int64_t catalog_size = GetFileSize((*i)->database_path());
       if (catalog_size < 0)
-        return NULL;
+        return false;
       LogCvmfs(kLogCatalog, kLogVerboseMsg, "Committing repository manifest");
-      result = new manifest::Manifest(hash, catalog_size, "");
-      result->set_ttl((*i)->GetTTL());
-      result->set_revision((*i)->GetRevision());
+      manifest->set_catalog_hash(hash);
+      manifest->set_catalog_size(catalog_size);
+      manifest->set_root_path("");
+      manifest->set_ttl((*i)->GetTTL());
+      manifest->set_revision((*i)->GetRevision());
     }
   }
 
   spooler_->UnregisterListeners();
-
-  return result;
+  return true;
 }
 
 
@@ -834,6 +866,35 @@ shash::Any WritableCatalogManager::SnapshotCatalog(WritableCatalog *catalog)
   }
 
   return hash_catalog;
+}
+
+void WritableCatalogManager::DoBalance() {
+  CatalogList catalog_list = GetCatalogs();
+  reverse(catalog_list.begin(), catalog_list.end());
+  for (unsigned i = 0; i < catalog_list.size(); ++i) {
+    FixWeight(static_cast<WritableCatalog*>(catalog_list[i]));
+  }
+}
+
+void WritableCatalogManager::FixWeight(WritableCatalog* catalog) {
+  // firstly check underflow because they can provoke overflows
+  if (catalog->GetNumEntries() < min_weight_ &&
+      !catalog->IsRoot() &&
+      catalog->IsAutogenerated()) {
+    LogCvmfs(kLogCatalog, kLogStdout,
+             "Deleting an autogenerated catalog in '%s'",
+             catalog->path().c_str());
+    // Remove the .cvmfscatalog and .cvmfsautocatalog files first
+    string path = catalog->path().ToString();
+    catalog->RemoveEntry(path + "/.cvmfscatalog");
+    catalog->RemoveEntry(path + "/.cvmfsautocatalog");
+    // Remove the actual catalog
+    string catalog_path = catalog->path().ToString().substr(1);
+    RemoveNestedCatalog(catalog_path);
+  } else if (catalog->GetNumEntries() > max_weight_) {
+    CatalogBalancer<WritableCatalogManager> catalog_balancer(this);
+    catalog_balancer.Balance(catalog);
+  }
 }
 
 void WritableCatalogManager::CatalogUploadCallback(

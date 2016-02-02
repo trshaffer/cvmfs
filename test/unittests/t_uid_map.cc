@@ -95,7 +95,7 @@ class T_UidMap : public ::testing::Test {
 };
 
 template <typename MapT>
-const std::string T_UidMap<MapT>::sandbox = "/tmp/cvmfs_ut_uid_map";
+const std::string T_UidMap<MapT>::sandbox = "./cvmfs_ut_uid_map";
 
 typedef ::testing::Types<
   UidMap,
@@ -106,6 +106,8 @@ TYPED_TEST(T_UidMap, Initialize) {
   TypeParam map;
   EXPECT_TRUE(map.IsValid());
   EXPECT_FALSE(map.HasDefault());
+  EXPECT_TRUE(map.IsEmpty());
+  EXPECT_FALSE(map.HasEffect());
 }
 
 
@@ -116,6 +118,8 @@ TYPED_TEST(T_UidMap, Insert) {
   EXPECT_TRUE(map.IsValid());
   EXPECT_FALSE(map.HasDefault());
   EXPECT_EQ(2u, map.RuleCount());
+  EXPECT_FALSE(map.IsEmpty());
+  EXPECT_TRUE(map.HasEffect());
 }
 
 
@@ -144,6 +148,16 @@ TYPED_TEST(T_UidMap, Contains) {
 }
 
 
+TYPED_TEST(T_UidMap, Empty) {
+  TypeParam map;
+  EXPECT_TRUE(map.IsEmpty());
+  EXPECT_FALSE(map.HasEffect());
+  map.SetDefault(TestFixture::v(42));
+  EXPECT_TRUE(map.IsEmpty());
+  EXPECT_TRUE(map.HasEffect());
+}
+
+
 TYPED_TEST(T_UidMap, MapWithoutDefault) {
   TypeParam map;
   map.Set(TestFixture::k(0), TestFixture::v(1));
@@ -151,7 +165,7 @@ TYPED_TEST(T_UidMap, MapWithoutDefault) {
 
   EXPECT_EQ(TestFixture::v(1), map.Map(TestFixture::k(0)));
   EXPECT_EQ(TestFixture::v(2), map.Map(TestFixture::k(1)));
-  EXPECT_EQ(TestFixture::v(0), map.Map(TestFixture::k(3)));
+  EXPECT_EQ(TestFixture::v(3), map.Map(TestFixture::k(3)));
 }
 
 

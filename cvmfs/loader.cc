@@ -41,6 +41,12 @@
 #include "sanitizer.h"
 #include "util.h"
 
+// If valgrind headers are present on the build system,
+// then we can detect valgrind at runtime.
+#ifdef HAS_VALGRIND_HEADERS
+#include <valgrind/valgrind.h>
+#endif
+
 using namespace std;  // NOLINT
 
 namespace loader {
@@ -448,6 +454,11 @@ static CvmfsExports *LoadLibrary(const bool debug_mode,
     library_paths.push_back(library_name);
     library_paths.push_back("/usr/lib/"   + library_name);
     library_paths.push_back("/usr/lib64/" + library_name);
+#ifdef __APPLE__
+    // Since OS X El Capitan (10.11) came with SIP, we needed to relocate our
+    // binaries from /usr/... to /usr/local/...
+    library_paths.push_back("/usr/local/lib/" + library_name);
+#endif
   }
 
   vector<string>::const_iterator i    = library_paths.begin();
@@ -696,8 +707,8 @@ int main(int argc, char *argv[]) {
   // Allow for up to 5 minute "hangs" before OS X may kill cvmfs
   fuse_opt_add_arg(mount_options, "-odaemon_timeout=300");
   fuse_opt_add_arg(mount_options, "-onoapplexattr");
-  // Make libfuse single-threaded for the time being; see CVM-871, CVM-855
-  single_threaded_ = true;
+  // Should libfuse be single-threaded?  See CVM-871, CVM-855
+  // single_threaded_ = true;
 #endif
   if (options_manager->GetValue("CVMFS_MOUNT_RW", &parameter) &&
       options_manager->IsOn(parameter))
@@ -768,8 +779,15 @@ int main(int argc, char *argv[]) {
         LogCvmfs(kLogCvmfs, kLogStderr | kLogSyslogErr,
                  "Failed to set maximum number of open files, "
                  "insufficient permissions");
-        // TODO(jblomer) detect valgrind and don't fail
+#ifdef HAS_VALGRIND_HEADERS
+        if (!RUNNING_ON_VALGRIND) {
+          return kFailPermission;
+        } else {
+          LogCvmfs(kLogCvmfs, kLogStdout, "CernVM-FS: running under valgrind");
+        }
+#else
         return kFailPermission;
+#endif
       }
     }
   }

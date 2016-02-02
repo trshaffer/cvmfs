@@ -33,6 +33,7 @@
 #include "cvmfs.h"
 #include "download.h"
 #include "duplex_sqlite3.h"
+#include "glue_buffer.h"
 #include "loader.h"
 #include "logging.h"
 #include "lru.h"
@@ -78,6 +79,30 @@ static void AnswerStringList(const int con_fd, const vector<string> &list) {
   Answer(con_fd, list_str);
 }
 
+
+static std::string GenerateHostInfo(download::DownloadManager *manager) {
+  vector<string> host_chain;
+  vector<int> rtt;
+  unsigned active_host;
+
+  manager->GetHostInfo(&host_chain, &rtt, &active_host);
+  string host_str;
+  for (unsigned i = 0; i < host_chain.size(); ++i) {
+    host_str += "  [" + StringifyInt(i) + "] " + host_chain[i] + " (";
+    if (rtt[i] == download::DownloadManager::kProbeUnprobed)
+      host_str += "unprobed";
+    else if (rtt[i] == download::DownloadManager::kProbeDown)
+      host_str += "host down";
+    else if (rtt[i] == download::DownloadManager::kProbeGeo)
+      host_str += "geographically ordered";
+    else
+      host_str += StringifyInt(rtt[i]) + " ms";
+    host_str += ")\n";
+  }
+  host_str += "Active host " + StringifyInt(active_host) + ": " +
+              host_chain[active_host] + "\n";
+  return host_str;
+}
 
 static void *MainTalk(void *data __attribute__((unused))) {
   LogCvmfs(kLogTalk, kLogDebug, "talk thread started");
@@ -149,6 +174,19 @@ static void *MainTalk(void *data __attribute__((unused))) {
         } else {
           vector<string> ls_catalogs = quota_mgr->ListCatalogs();
           AnswerStringList(con_fd, ls_catalogs);
+        }
+      } else if (line.substr(0, 12) == "cleanup rate") {
+        QuotaManager *quota_mgr = cvmfs::cache_manager_->quota_mgr();
+        if (!quota_mgr->IsEnforcing()) {
+          Answer(con_fd, "Cache is unmanaged\n");
+        } else {
+          if (line.length() < 9) {
+            Answer(con_fd, "Usage: cleanup rate <period in mn>\n");
+          } else {
+            const uint64_t period_s = String2Uint64(line.substr(13)) * 60;
+            const uint64_t rate = quota_mgr->GetCleanupRate(period_s);
+            Answer(con_fd, StringifyInt(rate) + "\n");
+          }
         }
       } else if (line.substr(0, 7) == "cleanup") {
         QuotaManager *quota_mgr = cvmfs::cache_manager_->quota_mgr();
@@ -235,28 +273,10 @@ static void *MainTalk(void *data __attribute__((unused))) {
           cvmfs::download_manager_->SetDnsServer(host);
           Answer(con_fd, "OK\n");
         }
+      } else if (line == "external host info") {
+        Answer(con_fd, GenerateHostInfo(cvmfs::external_download_manager_));
       } else if (line == "host info") {
-        vector<string> host_chain;
-        vector<int> rtt;
-        unsigned active_host;
-
-        cvmfs::download_manager_->GetHostInfo(&host_chain, &rtt, &active_host);
-        string host_str;
-        for (unsigned i = 0; i < host_chain.size(); ++i) {
-          host_str += "  [" + StringifyInt(i) + "] " + host_chain[i] + " (";
-          if (rtt[i] == download::DownloadManager::kProbeUnprobed)
-            host_str += "unprobed";
-          else if (rtt[i] == download::DownloadManager::kProbeDown)
-            host_str += "host down";
-          else if (rtt[i] == download::DownloadManager::kProbeGeo)
-            host_str += "geographically ordered";
-          else
-            host_str += StringifyInt(rtt[i]) + " ms";
-          host_str += ")\n";
-        }
-        host_str += "Active host " + StringifyInt(active_host) + ": " +
-                    host_chain[active_host] + "\n";
-        Answer(con_fd, host_str);
+        Answer(con_fd, GenerateHostInfo(cvmfs::download_manager_));
       } else if (line == "host probe") {
         cvmfs::download_manager_->ProbeHosts();
         Answer(con_fd, "OK\n");
@@ -269,6 +289,14 @@ static void *MainTalk(void *data __attribute__((unused))) {
       } else if (line == "host switch") {
         cvmfs::download_manager_->SwitchHost();
         Answer(con_fd, "OK\n");
+      } else if (line.substr(0, 16) == "external host set") {
+        if (line.length() < 18) {
+          Answer(con_fd, "Usage: external host set <URL>\n");
+        } else {
+          const std::string host = line.substr(17);
+          cvmfs::external_download_manager_->SetHostChain(host);
+          Answer(con_fd, "OK\n");
+        }
       } else if (line.substr(0, 8) == "host set") {
         if (line.length() < 10) {
           Answer(con_fd, "Usage: host set <host list>\n");
@@ -367,7 +395,7 @@ static void *MainTalk(void *data __attribute__((unused))) {
         int highwater;
         string result;
 
-        // manually setting the values of the ShortString counters
+        // Manually setting the values of the ShortString counters
         cvmfs::statistics_->Lookup("pathstring.n_instances")->
             Set(PathString::num_instances());
         cvmfs::statistics_->Lookup("pathstring.n_overflows")->
@@ -380,6 +408,22 @@ static void *MainTalk(void *data __attribute__((unused))) {
             Set(LinkString::num_instances());
         cvmfs::statistics_->Lookup("linkstring.n_overflows")->
             Set(LinkString::num_overflows());
+
+        // Manually setting the inode tracker numbers
+        glue::InodeTracker::Statistics inode_stats =
+          cvmfs::inode_tracker_->GetStatistics();
+        cvmfs::statistics_->Lookup("inode_tracker.n_insert")->Set(
+          atomic_read64(&inode_stats.num_inserts));
+        cvmfs::statistics_->Lookup("inode_tracker.n_remove")->Set(
+          atomic_read64(&inode_stats.num_removes));
+        cvmfs::statistics_->Lookup("inode_tracker.no_reference")->Set(
+          atomic_read64(&inode_stats.num_references));
+        cvmfs::statistics_->Lookup("inode_tracker.n_hit_inode")->Set(
+          atomic_read64(&inode_stats.num_hits_inode));
+        cvmfs::statistics_->Lookup("inode_tracker.n_hit_path")->Set(
+          atomic_read64(&inode_stats.num_hits_path));
+        cvmfs::statistics_->Lookup("inode_tracker.n_miss_path")->Set(
+          atomic_read64(&inode_stats.num_misses_path));
 
         if (cvmfs::cache_manager_->id() == cache::kPosixCacheManager) {
           cache::PosixCacheManager *cache_mgr =
@@ -548,7 +592,8 @@ void Fini() {
   result = unlink(socket_path_->c_str());
   if (result != 0) {
     LogCvmfs(kLogTalk, kLogSyslogWarn,
-             "Could not remove cvmfs_io socket from cache directory.");
+             "Could not remove cvmfs_io socket from cache directory (%d)",
+             errno);
   }
 
   delete cachedir_;

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 
+#include "../../cvmfs/atomic.h"
 #include "../../cvmfs/backoff.h"
 #include "../../cvmfs/cache.h"
 #include "../../cvmfs/download.h"
@@ -25,10 +26,11 @@ class T_Fetcher : public ::testing::Test {
   virtual void SetUp() {
     used_fds_ = GetNoUsedFds();
 
-    tmp_path_ = CreateTempDir("/tmp/cvmfs_test");
-    // Three source files that can be downloaded
+    tmp_path_ = CreateTempDir(GetCurrentWorkingDirectory() + "/cvmfs_ut_fetch");
+    // 4 source files that can be downloaded
     src_path_ = tmp_path_ + "/data";
     hash_regular_ = shash::Any(shash::kSha1);
+    hash_uncompressed_ = shash::Any(shash::kSha1);
     hash_catalog_ = shash::Any(shash::kSha1, shash::kSuffixCatalog);
     hash_cert_ = shash::Any(shash::kSha1, shash::kSuffixCertificate);
     unsigned char x = 'x';
@@ -38,9 +40,18 @@ class T_Fetcher : public ::testing::Test {
     uint64_t buf_size;
     EXPECT_TRUE(zlib::CompressMem2Mem(&x, 1, &buf, &buf_size));
     shash::HashMem(static_cast<unsigned char *>(buf), buf_size, &hash_regular_);
+    shash::HashMem(&x, 1, &hash_uncompressed_);
     MkdirDeep(GetParentPath(src_path_ + "/" + hash_regular_.MakePath()), 0700);
+    MkdirDeep(GetParentPath(src_path_ + "/" + hash_uncompressed_.MakePath()),
+              0700);
     EXPECT_TRUE(CopyMem2Path(static_cast<unsigned char *>(buf), buf_size,
                              src_path_ + "/" + hash_regular_.MakePath()));
+    EXPECT_TRUE(CopyMem2Path(&x, 1,
+                             src_path_ + "/" + hash_uncompressed_.MakePath()));
+    EXPECT_TRUE(CopyMem2Path(static_cast<unsigned char *>(buf), buf_size,
+                             tmp_path_ + "/reg"));
+    EXPECT_TRUE(CopyMem2Path(static_cast<unsigned char *>(buf), buf_size,
+                             tmp_path_ + "/altpath"));
     free(buf);
     EXPECT_TRUE(zlib::CompressMem2Mem(&y, 1, &buf, &buf_size));
     shash::HashMem(static_cast<unsigned char *>(buf), buf_size, &hash_catalog_);
@@ -65,10 +76,14 @@ class T_Fetcher : public ::testing::Test {
 
     fetcher_ = new Fetcher(
       cache_mgr_, download_mgr_, &backoff_throttle_, &statistics_);
+    external_fetcher_ = new Fetcher(
+      cache_mgr_, download_mgr_, &backoff_throttle_, &statistics_,
+      "fetch-external", true);
   }
 
   virtual void TearDown() {
     delete fetcher_;
+    delete external_fetcher_;
     download_mgr_->Fini();
     delete download_mgr_;
     delete cache_mgr_;
@@ -78,11 +93,13 @@ class T_Fetcher : public ::testing::Test {
   }
 
   Fetcher *fetcher_;
+  Fetcher *external_fetcher_;
   cache::PosixCacheManager *cache_mgr_;
   perf::Statistics statistics_;
   download::DownloadManager *download_mgr_;
   unsigned used_fds_;
   shash::Any hash_regular_;
+  shash::Any hash_uncompressed_;
   shash::Any hash_catalog_;
   shash::Any hash_cert_;
   string tmp_path_;
@@ -100,10 +117,11 @@ class BuggyCacheManager : public cache::CacheManager {
     : open_2nd_try(false)
     , allow_open(false)
     , stall_in_ctrltxn(false)
-    , waiting_in_ctrltxn(false)
-    , continue_ctrltxn(false)
     , allow_open_from_txn(false)
-  { }
+  {
+    atomic_init32(&waiting_in_ctrltxn);
+    atomic_init32(&continue_ctrltxn);
+  }
   virtual cache::CacheManagerIds id() { return cache::kUnknownCacheManager; }
   virtual bool AcquireQuotaManager(QuotaManager *qm) { return false; }
   virtual int Open(const shash::Any &id) {
@@ -134,9 +152,9 @@ class BuggyCacheManager : public cache::CacheManager {
     void *txn)
   {
     if (stall_in_ctrltxn) {
-      waiting_in_ctrltxn = true;
-      while (!continue_ctrltxn) { }
-      waiting_in_ctrltxn = false;
+      atomic_inc32(&waiting_in_ctrltxn);
+      while (atomic_read32(&continue_ctrltxn) == 0) { }
+      atomic_dec32(&waiting_in_ctrltxn);
     }
   }
   virtual int64_t Write(const void *buf, uint64_t sz, void *txn) {
@@ -160,8 +178,8 @@ class BuggyCacheManager : public cache::CacheManager {
   bool open_2nd_try;
   bool allow_open;
   bool stall_in_ctrltxn;
-  bool waiting_in_ctrltxn;
-  bool continue_ctrltxn;
+  atomic_int32 waiting_in_ctrltxn;
+  atomic_int32 continue_ctrltxn;
   bool allow_open_from_txn;
 };
 
@@ -191,22 +209,54 @@ TEST_F(T_Fetcher, GetTls) {
 }
 
 
+TEST_F(T_Fetcher, ExternalFetch) {
+  // Make sure our file is not in the cache
+  EXPECT_EQ(0, unlink((src_path_ + "/" + hash_regular_.MakePath()).c_str()));
+
+  // Download fails
+  EXPECT_EQ(-EIO,
+    external_fetcher_->Fetch(hash_regular_, cache::CacheManager::kSizeUnknown,
+                             "/reg-fail", zlib::kZlibDefault,
+                             cache::CacheManager::kTypeRegular));
+
+  // Download and store in cache
+  int fd = external_fetcher_->Fetch(hash_regular_,
+                                    cache::CacheManager::kSizeUnknown, "/reg",
+                                    zlib::kZlibDefault,
+                                    cache::CacheManager::kTypeRegular);
+  EXPECT_GE(fd, 0);
+  EXPECT_EQ(0, cache_mgr_->Close(fd));
+  fd = cache_mgr_->Open(hash_regular_);
+  EXPECT_GE(fd, 0);
+  EXPECT_EQ(0, cache_mgr_->Close(fd));
+
+  // Download fails
+  shash::Any rnd_hash(shash::kSha1);
+  rnd_hash.Randomize();
+  EXPECT_EQ(-EIO,
+    fetcher_->Fetch(rnd_hash, cache::CacheManager::kSizeUnknown, "/reg",
+                    zlib::kZlibDefault, cache::CacheManager::kTypeRegular));
+}
+
+
 TEST_F(T_Fetcher, Fetch) {
   // Cache hit
   unsigned char x = 'x';
   shash::Any hash_avail(shash::kSha1);
   EXPECT_TRUE(cache_mgr_->CommitFromMem(hash_avail, &x, 1, ""));
   int fd =
-    fetcher_->Fetch(hash_avail, 1, "", cache::CacheManager::kTypeRegular);
+    fetcher_->Fetch(hash_avail, 1, "", zlib::kZlibDefault,
+                    cache::CacheManager::kTypeRegular);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
-  fd = fetcher_->Fetch(hash_avail, 1, "", cache::CacheManager::kTypeCatalog);
+  fd = fetcher_->Fetch(hash_avail, 1, "", zlib::kZlibDefault,
+                       cache::CacheManager::kTypeCatalog);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
 
   // Download and store in cache
   fd = fetcher_->Fetch(hash_regular_, cache::CacheManager::kSizeUnknown, "reg",
-                       cache::CacheManager::kTypeRegular);
+                       zlib::kZlibDefault, cache::CacheManager::kTypeRegular);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
   fd = cache_mgr_->Open(hash_regular_);
@@ -218,14 +268,51 @@ TEST_F(T_Fetcher, Fetch) {
   rnd_hash.Randomize();
   EXPECT_EQ(-EIO,
     fetcher_->Fetch(rnd_hash, cache::CacheManager::kSizeUnknown, "rnd",
-                    cache::CacheManager::kTypeRegular));
+                    zlib::kZlibDefault, cache::CacheManager::kTypeRegular));
 
   // Download and store catalog
   fd = fetcher_->Fetch(hash_catalog_, cache::CacheManager::kSizeUnknown, "cat",
-                       cache::CacheManager::kTypeCatalog);
+                       zlib::kZlibDefault, cache::CacheManager::kTypeCatalog);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
   fd = cache_mgr_->Open(hash_catalog_);
+  EXPECT_GE(fd, 0);
+  EXPECT_EQ(0, cache_mgr_->Close(fd));
+}
+
+
+TEST_F(T_Fetcher, FetchUncompressed) {
+  EXPECT_EQ(-ENOENT, cache_mgr_->Open(hash_uncompressed_));
+
+  // Download and store in cache
+  // TODO(jblomer): use cache::CacheManager::kSizeUnknown
+  int fd =
+    fetcher_->Fetch(hash_uncompressed_, 1, "x",
+                    zlib::kZlibDefault, cache::CacheManager::kTypeRegular);
+  EXPECT_EQ(-EIO, fd);
+
+  fd =
+    fetcher_->Fetch(hash_uncompressed_, 1, "x",
+                    zlib::kNoCompression, cache::CacheManager::kTypeRegular);
+  EXPECT_GE(fd, 0);
+  EXPECT_EQ(0, cache_mgr_->Close(fd));
+  fd = cache_mgr_->Open(hash_uncompressed_);
+  EXPECT_GE(fd, 0);
+  EXPECT_EQ(0, cache_mgr_->Close(fd));
+}
+
+
+TEST_F(T_Fetcher, FetchAltPath) {
+  unlink((src_path_ + "/" + hash_regular_.MakePath()).c_str());
+  int fd;
+  fd = fetcher_->Fetch(hash_regular_, cache::CacheManager::kSizeUnknown, "reg",
+                       zlib::kZlibDefault, cache::CacheManager::kTypeRegular);
+  EXPECT_LT(fd, 0);
+
+  fd = fetcher_->Fetch(hash_regular_, cache::CacheManager::kSizeUnknown, "reg",
+                       zlib::kZlibDefault,
+                       cache::CacheManager::kTypeRegular,
+                       "altpath");
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
 }
@@ -238,13 +325,13 @@ TEST_F(T_Fetcher, FetchTransactionFailures) {
   Fetcher f(&bcm, download_mgr_, &backoff_throttle_, &statistics);
   EXPECT_EQ(-EBADF,
     f.Fetch(hash_catalog_, cache::CacheManager::kSizeUnknown, "cat",
-            cache::CacheManager::kTypeCatalog));
+            zlib::kZlibDefault, cache::CacheManager::kTypeCatalog));
 
   // Wrong size (commit fails)
-  EXPECT_EQ(-EIO, fetcher_->Fetch(hash_cert_, 2, "cat",
+  EXPECT_EQ(-EIO, fetcher_->Fetch(hash_cert_, 2, "cat", zlib::kZlibDefault,
                                   cache::CacheManager::kTypeRegular));
   EXPECT_TRUE(FileExists(tmp_path_ + "/quarantaine/" + hash_cert_.ToString()));
-  int fd = fetcher_->Fetch(hash_cert_, 1, "cat",
+  int fd = fetcher_->Fetch(hash_cert_, 1, "cat", zlib::kZlibDefault,
                            cache::CacheManager::kTypeRegular);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, cache_mgr_->Close(fd));
@@ -253,7 +340,7 @@ TEST_F(T_Fetcher, FetchTransactionFailures) {
   RemoveTree(tmp_path_ + "/txn");
   EXPECT_EQ(-ENOENT,
     fetcher_->Fetch(hash_regular_, cache::CacheManager::kSizeUnknown, "reg",
-                    cache::CacheManager::kTypeRegular));
+                    zlib::kZlibDefault, cache::CacheManager::kTypeRegular));
 }
 
 
@@ -267,7 +354,7 @@ void *TestFetchCollapse(void *data) {
   Fetcher *f = info->f;
   BuggyCacheManager *bcm = reinterpret_cast<BuggyCacheManager *>(f->cache_mgr_);
   int fd = f->Fetch(info->hash, cache::CacheManager::kSizeUnknown, "cat",
-                    cache::CacheManager::kTypeCatalog);
+                    zlib::kZlibDefault, cache::CacheManager::kTypeCatalog);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, bcm->Close(fd));
   return NULL;
@@ -284,7 +371,7 @@ void *TestFetchCollapse2(void *data) {
       if (iDownloadQueue->second->size() > 0) {
         // printf("open up %s", iDownloadQueue->first.ToString().c_str());
         bcm->stall_in_ctrltxn = false;
-        bcm->continue_ctrltxn = true;
+        atomic_inc32(&bcm->continue_ctrltxn);
       }
     }
     pthread_mutex_unlock(f->lock_queues_download_);
@@ -300,12 +387,12 @@ TEST_F(T_Fetcher, FetchCollapse) {
   bcm.open_2nd_try = true;
   Fetcher f(&bcm, download_mgr_, &backoff_throttle_, &statistics);
   int fd = f.Fetch(hash_catalog_, cache::CacheManager::kSizeUnknown, "cat",
-                   cache::CacheManager::kTypeCatalog);
+                   zlib::kZlibDefault, cache::CacheManager::kTypeCatalog);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, bcm.Close(fd));
   // One again, nothing should be locked
   fd = f.Fetch(hash_catalog_, cache::CacheManager::kSizeUnknown, "cat",
-               cache::CacheManager::kTypeCatalog);
+               zlib::kZlibDefault, cache::CacheManager::kTypeCatalog);
   EXPECT_GE(fd, 0);
   EXPECT_EQ(0, bcm.Close(fd));
 
@@ -324,9 +411,9 @@ TEST_F(T_Fetcher, FetchCollapse) {
     pthread_create(&thread_collapse2, NULL, TestFetchCollapse2, &f));
 
   // Piggy-back onto existing download
-  while (!bcm.waiting_in_ctrltxn) { }
+  while (atomic_read32(&bcm.waiting_in_ctrltxn) == 0) { }
   fd = f.Fetch(hash_catalog_, cache::CacheManager::kSizeUnknown, "cat",
-               cache::CacheManager::kTypeCatalog);
+               zlib::kZlibDefault, cache::CacheManager::kTypeCatalog);
   EXPECT_EQ(-EROFS, fd);
   pthread_join(thread_collapse, NULL);
   pthread_join(thread_collapse2, NULL);

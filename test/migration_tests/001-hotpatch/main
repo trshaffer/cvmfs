@@ -131,7 +131,9 @@ cvmfs_run_test() {
   # download upstream package
   current_version=$(package_version $CVMFS_CLIENT_PACKAGE)
   echo "Version of testee:        $current_version"
-  previous_version=$(decrement_version $current_version)
+  # FIX ME: Once 2.2.0 is the "previous version" go back to the decrement_version
+  # previous_version=$(decrement_version $current_version)
+  previous_version="2.1.20"
   echo "Version to be downloaded: $previous_version"
   upstream_package_url=$(guess_package_url "cvmfs" ${previous_version}-1)
   echo "Download URL:             $upstream_package_url"
@@ -168,11 +170,13 @@ cvmfs_run_test() {
   # do some hammering on the file system (without interruption)
   echo "tar $src_dir (without interruption)"
   md5_1=$(tar_gzip_and_hash $src_dir $tar_log1 $script_location)
+  sudo cvmfs_talk -i sft.cern.ch cleanup 0
+
   echo "checksumming large files in $xxl_files_dir (without interruption)"
   checksum_large_files $xxl_files_dir $chksum_log1
+  sudo cvmfs_talk -i cernvm-prod.cern.ch cleanup 0
 
   # do some hammering on the file system
-  sudo cvmfs_talk -i sft cleanup 0
   echo "starting to tar $src_dir (log output in separate file)"
   tar_gzip_and_hash $src_dir $tar_log2 $script_location $md5_output &
   local tar_pid=$!

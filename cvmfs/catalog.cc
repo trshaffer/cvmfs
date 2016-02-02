@@ -14,6 +14,7 @@
 #include "platform.h"
 #include "smalloc.h"
 #include "util.h"
+#include "util_concurrency.h"
 
 using namespace std;  // NOLINT
 
@@ -55,6 +56,7 @@ Catalog::Catalog(const PathString &path,
   managed_database_(false),
   parent_(parent),
   nested_catalog_cache_dirty_(true),
+  voms_authz_status_(kVomsUnknown),
   initialized_(false)
 {
   max_row_id_ = 0;
@@ -139,6 +141,9 @@ bool Catalog::ReadCatalogCounters() {
   } else if (database().schema_revision() < 2) {
     statistics_loaded =
       counters_.ReadFromDatabase(database(), LegacyMode::kNoXattrs);
+  } else if (database().schema_revision() < 3) {
+    statistics_loaded =
+      counters_.ReadFromDatabase(database(), LegacyMode::kNoExternals);
   } else {
     statistics_loaded = counters_.ReadFromDatabase(database());
   }
@@ -208,37 +213,6 @@ bool Catalog::OpenDatabase(const string &db_path) {
 
   initialized_ = true;
   return true;
-}
-
-
-/**
- * Performs a lookup on this Catalog for a given inode
- * @param inode the inode to perform the lookup for
- * @param dirent this will be set to the found entry
- * @param parent_md5path this will be set to the hash of the parent path
- * @return true if lookup was successful, false otherwise
- */
-bool Catalog::LookupInode(const inode_t inode, DirectoryEntry *dirent,
-                          shash::Md5 *parent_md5path) const
-{
-  assert(IsInitialized());
-
-  pthread_mutex_lock(lock_);
-  sql_lookup_inode_->BindRowId(GetRowIdFromInode(inode));
-  const bool found = sql_lookup_inode_->FetchRow();
-
-  // Retrieve the DirectoryEntry if needed
-  if (found && (dirent != NULL))
-      *dirent = sql_lookup_inode_->GetDirent(this);
-
-  // Retrieve the path_hash of the parent path if needed
-  if (parent_md5path != NULL)
-      *parent_md5path = sql_lookup_inode_->GetParentPathHash();
-
-  sql_lookup_inode_->Reset();
-  pthread_mutex_unlock(lock_);
-
-  return found;
 }
 
 
@@ -347,17 +321,19 @@ bool Catalog::ListingMd5PathStat(const shash::Md5 &md5path,
  * Returns only struct stat values
  * @param path_hash the MD5 hash of the path of the directory to list
  * @param listing will be set to the resulting DirectoryEntryList
+ * @param expand_symlink defines if magic symlinks should be resolved
  * @return true on successful listing, false otherwise
  */
 bool Catalog::ListingMd5Path(const shash::Md5 &md5path,
-                             DirectoryEntryList *listing) const
+                             DirectoryEntryList *listing,
+                             const bool expand_symlink) const
 {
   assert(IsInitialized());
 
   pthread_mutex_lock(lock_);
   sql_listing_->BindPathHash(md5path);
   while (sql_listing_->FetchRow()) {
-    DirectoryEntry dirent = sql_listing_->GetDirent(this);
+    DirectoryEntry dirent = sql_listing_->GetDirent(this, expand_symlink);
     FixTransitionPoint(md5path, &dirent);
     listing->push_back(dirent);
   }
@@ -373,8 +349,9 @@ bool Catalog::AllChunksBegin() {
 }
 
 
-bool Catalog::AllChunksNext(shash::Any *hash) {
-  return sql_all_chunks_->Next(hash);
+bool Catalog::AllChunksNext(shash::Any *hash, zlib::Algorithms *compression_alg)
+{
+  return sql_all_chunks_->Next(hash, compression_alg);
 }
 
 
@@ -446,6 +423,28 @@ uint64_t Catalog::GetTTL() const {
 }
 
 
+bool Catalog::GetVOMSAuthz(string *authz) const {
+  bool result;
+  pthread_mutex_lock(lock_);
+  if (voms_authz_status_ == kVomsPresent) {
+    if (authz) {*authz = voms_authz_;}
+    result = true;
+  } else if (voms_authz_status_ == kVomsNone) {
+    result = false;
+  } else {
+    if (database().HasProperty("voms_authz")) {
+      voms_authz_ = database().GetProperty<string>("voms_authz");
+      if (authz) {*authz = voms_authz_;}
+      voms_authz_status_ = kVomsPresent;
+    } else {
+      voms_authz_status_ = kVomsNone;
+    }
+    result = (voms_authz_status_ == kVomsPresent);
+  }
+  pthread_mutex_unlock(lock_);
+  return result;
+}
+
 uint64_t Catalog::GetRevision() const {
   pthread_mutex_lock(lock_);
   const uint64_t result =
@@ -455,7 +454,15 @@ uint64_t Catalog::GetRevision() const {
 }
 
 uint64_t Catalog::GetLastModified() const {
-  return database().GetProperty<int>("last_modified");
+  const std::string prop_name = "last_modified";
+  return (database().HasProperty(prop_name))
+    ? database().GetProperty<int>(prop_name)
+    : 0u;
+}
+
+
+uint64_t Catalog::GetNumChunks() const {
+  return counters_.Get("self_regular") + counters_.Get("self_chunks");
 }
 
 
@@ -607,8 +614,8 @@ void Catalog::SetInodeAnnotation(InodeAnnotation *new_annotation) {
 
 
 void Catalog::SetOwnerMaps(const OwnerMap *uid_map, const OwnerMap *gid_map) {
-  uid_map_ = (uid_map && !uid_map->empty()) ? uid_map : NULL;
-  gid_map_ = (gid_map && !gid_map->empty()) ? gid_map : NULL;
+  uid_map_ = (uid_map && uid_map->HasEffect()) ? uid_map : NULL;
+  gid_map_ = (gid_map && gid_map->HasEffect()) ? gid_map : NULL;
 }
 
 

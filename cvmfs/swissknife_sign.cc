@@ -45,7 +45,11 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
   if (args.find('n') != args.end()) repo_name = *args.find('n')->second;
   string pwd = "";
   if (args.find('s') != args.end()) pwd = *args.find('s')->second;
+  string meta_info = "";
+  if (args.find('M') != args.end()) meta_info = *args.find('M')->second;
   upload::Spooler *spooler = NULL;
+  const bool garbage_collectable = (args.count('g') > 0);
+  const bool bootstrap_shortcuts = (args.count('A') > 0);
 
   if (!DirectoryExists(temp_dir)) {
     LogCvmfs(kLogCvmfs, kLogStderr, "%s does not exist", temp_dir.c_str());
@@ -71,6 +75,7 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
   }
 
   // Load private key
+  // TODO(rmeusel): eliminiate code duplication with swissknife_letter.cc
   if (priv_key == "") {
     LogCvmfs(kLogCvmfs, kLogStdout | kLogNoLinebreak,
              "Enter file name of private key file to your certificate []: ");
@@ -136,34 +141,44 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
                                        manifest->GetHashAlgorithm());
     spooler = upload::Spooler::Construct(sd);
 
-    // Safe certificate
-    void *compr_buf;
-    uint64_t compr_size;
-    if (!zlib::CompressMem2Mem(cert_buf, cert_buf_size,
-                               &compr_buf, &compr_size))
-    {
-      LogCvmfs(kLogCvmfs, kLogStderr, "Failed to compress certificate");
-      delete manifest;
-      goto sign_fail;
-    }
-    shash::Any certificate_hash(manifest->GetHashAlgorithm(),
-                                shash::kSuffixCertificate);
-    shash::HashMem((unsigned char *)compr_buf, compr_size, &certificate_hash);
-    const string cert_path_tmp = temp_dir + "/cvmfspublisher.tmp";
-    if (!CopyMem2Path((unsigned char *)compr_buf, compr_size, cert_path_tmp)) {
-      LogCvmfs(kLogCvmfs, kLogStderr, "Failed to save certificate");
-      delete manifest;
-      goto sign_fail;
-    }
-    free(compr_buf);
+    // Register callback for retrieving the certificate hash
+    upload::Spooler::CallbackPtr callback =
+      spooler->RegisterListener(&CommandSign::CertificateUploadCallback, this);
 
-    const string cert_hash_path = "data/" + certificate_hash.MakePath();
-    spooler->Upload(cert_path_tmp, cert_hash_path);
+    // Safe certificate (and wait for the upload through a Future)
+    spooler->ProcessCertificate(certificate);
+    const shash::Any certificate_hash = certificate_hash_.Get();
+    spooler->UnregisterListener(callback);
+
+    if (certificate_hash.IsNull()) {
+      LogCvmfs(kLogCvmfs, kLogStderr, "Failed to upload certificate");
+      goto sign_fail;
+    }
+
+    // Safe repository meta info file
+    shash::Any metainfo_hash;
+    if (!meta_info.empty()) {
+      upload::Spooler::CallbackPtr callback =
+        spooler->RegisterListener(&CommandSign::MetainfoUploadCallback, this);
+      spooler->ProcessMetainfo(meta_info);
+      metainfo_hash = metainfo_hash_.Get();
+      spooler->UnregisterListener(callback);
+
+      if (metainfo_hash.IsNull()) {
+        LogCvmfs(kLogCvmfs, kLogStderr, "Failed to upload meta info");
+        goto sign_fail;
+      }
+    }
 
     // Update manifest
     manifest->set_certificate(certificate_hash);
     manifest->set_repository_name(repo_name);
     manifest->set_publish_timestamp(time(NULL));
+    manifest->set_garbage_collectability(garbage_collectable);
+    manifest->set_has_alt_catalog_path(bootstrap_shortcuts);
+    if (!metainfo_hash.IsNull()) {
+      manifest->set_meta_info(metainfo_hash);
+    }
 
     string signed_manifest = manifest->ExportString();
     shash::Any published_hash(manifest->GetHashAlgorithm());
@@ -171,6 +186,24 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
       reinterpret_cast<const unsigned char *>(signed_manifest.data()),
       signed_manifest.length(), &published_hash);
     signed_manifest += "--\n" + published_hash.ToString() + "\n";
+
+    // Create alternative bootstrapping symlinks for VOMS secured repos
+    if (manifest->has_alt_catalog_path()) {
+      const bool success =
+        spooler->PlaceBootstrappingShortcut(manifest->certificate())  &&
+        spooler->PlaceBootstrappingShortcut(manifest->catalog_hash()) &&
+        (manifest->history().IsNull() ||
+         spooler->PlaceBootstrappingShortcut(manifest->history())) &&
+        (metainfo_hash.IsNull() ||
+         spooler->PlaceBootstrappingShortcut(metainfo_hash));
+
+      if (!success) {
+        LogCvmfs(kLogCvmfs, kLogStderr, "failed to place VOMS bootstrapping "
+                                        "symlinks");
+        delete manifest;
+        goto sign_fail;
+      }
+    }
 
     // Sign manifest
     unsigned char *sig;
@@ -181,7 +214,6 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
                                 &sig, &sig_size))
     {
       LogCvmfs(kLogCvmfs, kLogStderr, "Failed to sign manifest");
-      unlink(cert_path_tmp.c_str());
       delete manifest;
       goto sign_fail;
     }
@@ -201,7 +233,6 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
       LogCvmfs(kLogCvmfs, kLogStderr, "Failed to write manifest (errno: %d)",
                errno);
       fclose(fmanifest);
-      unlink(cert_path_tmp.c_str());
       delete manifest;
       goto sign_fail;
     }
@@ -212,7 +243,6 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
     spooler->Upload(manifest_path, ".cvmfspublished");
     spooler->WaitForUpload();
 
-    unlink(cert_path_tmp.c_str());
     unlink(manifest_path.c_str());
     if (spooler->GetNumberOfErrors()) {
       LogCvmfs(kLogCvmfs, kLogStderr, "Failed to commit manifest (errors: %d)",
@@ -235,3 +265,29 @@ int swissknife::CommandSign::Main(const swissknife::ArgumentList &args) {
   return 1;
 }
 
+
+void swissknife::CommandSign::CertificateUploadCallback(
+                                          const upload::SpoolerResult &result) {
+  shash::Any certificate_hash;
+  if (result.return_code == 0) {
+    certificate_hash = result.content_hash;
+  } else {
+    LogCvmfs(kLogCvmfs, kLogStderr, "Failed to upload certificate "
+                                    "(retcode: %d)",
+                                    result.return_code);
+  }
+  certificate_hash_.Set(certificate_hash);
+}
+
+
+void swissknife::CommandSign::MetainfoUploadCallback(
+                                          const upload::SpoolerResult &result) {
+  shash::Any metainfo_hash;
+  if (result.return_code == 0) {
+    metainfo_hash = result.content_hash;
+  } else {
+    LogCvmfs(kLogCvmfs, kLogStderr, "Failed to upload meta info (retcode: %d)",
+             result.return_code);
+  }
+  metainfo_hash_.Set(metainfo_hash);
+}

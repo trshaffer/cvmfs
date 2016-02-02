@@ -124,6 +124,13 @@ class Database : SingleCopy {
   bool                read_write()      const { return read_write_;           }
 
   /**
+   * Provides the number of rows modified by INSERT, UPDATE or DELETE statements
+   * that have been run against this database since it was opened.
+   * @return  number of rows modified by all executed manipulating statements
+   */
+  unsigned GetModifiedRowCount() const;
+
+  /**
    * Figures out the ratio of free SQLite memory pages in the SQLite database
    * file. A high ratio can be an indication of a necessary call to Vacuum().
    * Note: This is not done automatically and the decision is left to the using
@@ -340,6 +347,15 @@ class Sql {
   int RetrieveType(const int idx_column) const {
     return sqlite3_column_type(statement_, idx_column);
   }
+
+  /**
+   * Determines the number of bytes necessary to store the column's data as a
+   * string. This might involve type conversions and depends on which other
+   * RetrieveXXX methods were called on the same column index before!
+   *
+   * See SQLite documentation for sqlite_column_bytes() for details:
+   *   https://www.sqlite.org/c3ref/column_blob.html
+   */
   int RetrieveBytes(const int idx_column) const {
     return sqlite3_column_bytes(statement_, idx_column);
   }

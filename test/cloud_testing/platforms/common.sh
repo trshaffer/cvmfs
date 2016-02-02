@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 export LC_ALL=C
 
@@ -228,8 +228,13 @@ install_rpm() {
 
     # install the RPM
     echo -n "Installing RPM '$rpm_name' ... "
-    yum_output=$(sudo yum -y install --nogpgcheck $this_rpm 2>&1)
-    check_package_manager_response $? "Yum" "$yum_output"
+    if which dnf > /dev/null 2>&1; then
+      yum_output=$(sudo dnf -y install --nogpgcheck $this_rpm 2>&1)
+      check_package_manager_response $? "DNF" "$yum_output"
+    else
+      yum_output=$(sudo yum -y install --nogpgcheck $this_rpm 2>&1)
+      check_package_manager_response $? "Yum" "$yum_output"
+    fi
   done
 }
 
@@ -257,6 +262,8 @@ install_from_repo() {
   # find out which package manager to use
   if which apt-get > /dev/null 2>&1; then
     pkg_mgr="apt-get"
+  elif which dnf > /dev/null 2>&1; then
+    pkg_mgr="dnf"
   else
     pkg_mgr="yum"
   fi
@@ -269,12 +276,20 @@ install_from_repo() {
 
 
 install_ruby_gem() {
-  local gem_name=$1
+  local gem_name="$1"
+  local gem_version="$2"
   local pkg_mgr_name="gem"
   local pkg_mgr_output=""
 
-  echo -n "Installing Ruby gem '$gem_name' ... "
-  pkg_mgr_output=$(sudo gem install $gem_name 2>&1)
+  local gem_install_cmd="sudo gem install $gem_name"
+  if [ ! -z "$gem_version" ]; then
+    gem_install_cmd="$gem_install_cmd --version $gem_version"
+  else
+    gem_version="latest"
+  fi
+
+  echo -n "Installing Ruby gem '$gem_name' (version: $gem_version) ... "
+  pkg_mgr_output=$($gem_install_cmd 2>&1)
   check_package_manager_response $? $pkg_mgr_name "$pkg_mgr_output"
 }
 
@@ -340,7 +355,7 @@ check_result() {
 run_unittests() {
   echo -n "running CernVM-FS unit tests... "
   local xml_output="${UNITTEST_LOGFILE}${XUNIT_OUTPUT_SUFFIX}"
-  cvmfs_unittests --gtest_output="xml:$xml_output" $@ >> $UNITTEST_LOGFILE 2>&1
+  /usr/bin/cvmfs_unittests --gtest_output="xml:$xml_output" $@ >> $UNITTEST_LOGFILE 2>&1
   local ut_retval=$?
   check_result $ut_retval
 

@@ -31,7 +31,7 @@ class T_CacheManager : public ::testing::Test {
   virtual void SetUp() {
     used_fds_ = GetNoUsedFds();
 
-    tmp_path_ = CreateTempDir("/tmp/cvmfs_test");
+    tmp_path_ = CreateTempDir("./cvmfs_ut_cache_manager");
     cache_mgr_ = PosixCacheManager::Create(tmp_path_, false);
     ASSERT_TRUE(cache_mgr_ != NULL);
     alien_cache_mgr_ = PosixCacheManager::Create(tmp_path_, true);
@@ -213,6 +213,7 @@ class TestQuotaManager : public QuotaManager {
   virtual uint64_t GetCapacity() { return 100*1024*1024; }
   virtual uint64_t GetSize() { return 0; }
   virtual uint64_t GetSizePinned() { return 0; }
+  virtual uint64_t GetCleanupRate(uint64_t period_s) { return 0; }
 
   virtual void Spawn() { }
   virtual pid_t GetPid() { return getpid(); }
@@ -671,7 +672,7 @@ TEST_F(T_CacheManager, Rename) {
   EXPECT_EQ(-ENOENT, cache_mgr_->Rename(path_null.c_str(), path_one.c_str()));
 
   EXPECT_TRUE(CopyPath2Path(path_one, path_null));
-  cache_mgr_->alien_cache_on_nfs_ = true;
+  cache_mgr_->workaround_rename_ = true;
   EXPECT_EQ(0, cache_mgr_->Rename(path_null.c_str(), path_one.c_str()));
   EXPECT_FALSE(FileExists(path_null));
   EXPECT_TRUE(FileExists(path_one));
