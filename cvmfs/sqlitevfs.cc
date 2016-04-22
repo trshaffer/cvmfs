@@ -14,6 +14,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <sys/select.h>
@@ -33,6 +34,7 @@
 #include "platform.h"
 #include "smalloc.h"
 #include "statistics.h"
+#include "util/string.h"
 
 using namespace std;  // NOLINT
 
