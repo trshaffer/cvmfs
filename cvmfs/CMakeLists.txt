@@ -56,6 +56,7 @@ set (CVMFS_CLIENT_SOURCES
   globals.cc globals.h
   hash.cc hash.h
   json_document.cc json_document.h
+  kvstore.h kvstore.cc
   logging.cc logging.h logging_internal.h
   lru.h
   manifest.cc manifest.h
