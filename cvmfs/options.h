@@ -101,15 +101,7 @@ class OptionsManager {
    */
   std::string Dump();
 
-  /**
-   * Parse a configuration file whose variables' values are positive integers
-   *
-   * @param  path absolute path to the configuration file
-   * @param  map map to store the generated key-value
-   * @return true if the file exists, is readable and all values can be parsed
-   *         to integers
-   */
-  bool ParseUIntMap(const std::string &path, std::map<uint64_t, uint64_t> *map);
+  bool HasConfigRepository(const std::string &fqrn, std::string *config_path);
 
  protected:
   /**
@@ -120,8 +112,6 @@ class OptionsManager {
     std::string value;
     std::string source;
   };
-
-  bool HasConfigRepository(const std::string &fqrn, std::string *config_path);
 
   std::map<std::string, ConfigValue> config_;
 };  // class OptionManager

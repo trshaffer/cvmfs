@@ -407,6 +407,30 @@ TEST_F(T_Dns, HostValid) {
 }
 
 
+TEST_F(T_Dns, HostBestAddresses) {
+  Host host;
+  host.name_ = "name";
+  host.status_ = kFailOk;
+  host.deadline_ = time(NULL) + 10;
+  host.ipv4_addresses_.insert("10.0.0.1");
+  EXPECT_TRUE(host.IsValid());
+
+  EXPECT_EQ("10.0.0.1", *host.ViewBestAddresses(kIpPreferSystem).begin());
+  EXPECT_EQ("10.0.0.1", *host.ViewBestAddresses(kIpPreferV4).begin());
+  EXPECT_EQ("10.0.0.1", *host.ViewBestAddresses(kIpPreferV6).begin());
+
+  host.ipv6_addresses_.insert("[::1]");
+  EXPECT_EQ("10.0.0.1", *host.ViewBestAddresses(kIpPreferSystem).begin());
+  EXPECT_EQ("10.0.0.1", *host.ViewBestAddresses(kIpPreferV4).begin());
+  EXPECT_EQ("[::1]", *host.ViewBestAddresses(kIpPreferV6).begin());
+
+  host.ipv4_addresses_.clear();
+  EXPECT_EQ("[::1]", *host.ViewBestAddresses(kIpPreferSystem).begin());
+  EXPECT_EQ("[::1]", *host.ViewBestAddresses(kIpPreferV4).begin());
+  EXPECT_EQ("[::1]", *host.ViewBestAddresses(kIpPreferV6).begin());
+}
+
+
 TEST_F(T_Dns, HostExtendDeadline) {
   Host host;
   host.name_ = "name";
@@ -580,7 +604,7 @@ TEST_F(T_Dns, CaresResolverMany) {
                      "192.5.5.241", "[2001:500:2f::f]");
   ExpectResolvedName(hosts[6], "g.root-servers.net", "192.112.36.4", "");
   ExpectResolvedName(hosts[7], "h.root-servers.net",
-                     "128.63.2.53", "[2001:500:1::803f:235]");
+                     "198.97.190.53", "[2001:500:1::53]");
   ExpectResolvedName(hosts[8], "i.root-servers.net",
                      "192.36.148.17", "[2001:7fe::53]");
   ExpectResolvedName(hosts[9], "j.root-servers.net",
@@ -618,6 +642,7 @@ TEST_F(T_Dns, CaresResolverFinalDot) {
 }
 
 
+// TODO(jblomer): figure out why this fails on Travis
 TEST_F(T_Dns, CaresResolverLocalhost) {
   Host host = default_resolver->Resolve("localhost");
   // Not using ExpectResolvedName because the canonical name for localhost
@@ -669,8 +694,9 @@ TEST_F(T_Dns, CaresResolverReadConfig) {
         nameservers.push_back("[" + tokens[1] + "]:53");
       else
         nameservers.push_back(tokens[1] + ":53");
-    } else if (tokens[0] == "search") {
-      domains.push_back(tokens[1]);
+    } else if ((tokens[0] == "search") || (tokens[0] == "domain")) {
+      for (unsigned i = 1; i < tokens.size(); ++i)
+        domains.push_back(tokens[i]);
     }
   }
   fclose(f);
@@ -686,10 +712,7 @@ TEST_F(T_Dns, CaresResolverReadConfig) {
 }
 
 
-// TODO(reneme): it is not entirely clear what is the error condition here. In
-//               particular this behaves differently on OS X and Linux. For now
-//               I just disable the test case.
-TEST_F(T_Dns, DISABLED_CaresResolverBadResolver) {
+TEST_F(T_Dns, CaresResolverBadResolver) {
   UniquePtr<CaresResolver> quick_resolver(CaresResolver::Create(false, 0, 100));
   ASSERT_TRUE(quick_resolver.IsValid());
 
@@ -700,7 +723,8 @@ TEST_F(T_Dns, DISABLED_CaresResolverBadResolver) {
   time_t before = time(NULL);
   Host host = quick_resolver->Resolve("a.root-servers.net");
   time_t after = time(NULL);
-  EXPECT_EQ(host.status(), kFailInvalidResolvers);
+  EXPECT_TRUE((host.status() == kFailInvalidResolvers) ||
+              (host.status() == kFailTimeout));
   EXPECT_LE(after-before, 1);
 }
 
@@ -931,6 +955,7 @@ TEST_F(T_Dns, NormalResolverLocalonly) {
 }
 
 
+// TODO(jblomer): figure out why this fails on Travis
 TEST_F(T_Dns, NormalResolverCombined) {
   UniquePtr<NormalResolver> resolver(NormalResolver::Create(false, 2, 2000));
   ASSERT_TRUE(resolver.IsValid());

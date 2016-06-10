@@ -90,6 +90,8 @@ class WritableCatalog : public Catalog {
   void IncrementRevision();
   void SetRevision(const uint64_t new_revision);
   void SetPreviousRevision(const shash::Any &hash);
+  void SetTTL(const uint64_t new_ttl);
+  bool SetVOMSAuthz(const std::string &voms_authz);
 
  protected:
   static const double kMaximalFreePageRatio   = 0.20;

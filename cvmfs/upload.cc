@@ -70,6 +70,10 @@ void Spooler::ProcessCertificate(const std::string &local_path) {
   file_processor_->Process(local_path, false, shash::kSuffixCertificate);
 }
 
+void Spooler::ProcessMetainfo(const std::string &local_path) {
+  file_processor_->Process(local_path, false, shash::kSuffixMetainfo);
+}
+
 
 void Spooler::Upload(const std::string &local_path,
                      const std::string &remote_path) {
@@ -87,6 +91,12 @@ bool Spooler::Remove(const std::string &file_to_delete) {
 
 bool Spooler::Peek(const std::string &path) const {
   return uploader_->Peek(path);
+}
+
+
+bool Spooler::PlaceBootstrappingShortcut(const shash::Any &object) const {
+  assert(!object.IsNull());
+  return uploader_->PlaceBootstrappingShortcut(object);
 }
 
 

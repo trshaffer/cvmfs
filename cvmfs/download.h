@@ -48,6 +48,7 @@ enum Failures {
   kFailBadData,
   kFailTooBig,
   kFailOther,
+  kFailUnsupportedProtocol,
 
   kFailNumEntries
 };  // Failures
@@ -68,7 +69,8 @@ inline const char *Code2Ascii(const Failures error) {
   texts[10] = "corrupted data received";
   texts[11] = "resource too big to download";
   texts[12] = "unknown network error";
-  texts[13] = "no text";
+  texts[13] = "Unsupported URL in protocol";
+  texts[14] = "no text";
   return texts[error];
 }
 
@@ -93,18 +95,17 @@ struct Counters {
   perf::Counter *n_proxy_failover;
   perf::Counter *n_host_failover;
 
-  explicit Counters(perf::Statistics *statistics) {
-    sz_transferred_bytes = statistics->Register("download.sz_transferred_bytes",
+  Counters(perf::Statistics *statistics, const std::string &name) {
+    sz_transferred_bytes = statistics->Register(name + ".sz_transferred_bytes",
         "Number of transferred bytes");
-    sz_transfer_time = statistics->Register("download.sz_transfer_time",
+    sz_transfer_time = statistics->Register(name + ".sz_transfer_time",
         "Transfer time (miliseconds)");
-    n_requests = statistics->Register("download.n_requests",
+    n_requests = statistics->Register(name + ".n_requests",
         "Number of requests");
-    n_retries = statistics->Register("download.n_retries",
-        "Number of retries");
-    n_proxy_failover = statistics->Register("download.n_proxy_failover",
+    n_retries = statistics->Register(name + ".n_retries", "Number of retries");
+    n_proxy_failover = statistics->Register(name + ".n_proxy_failover",
         "Number of proxy failovers");
-    n_host_failover = statistics->Register("download.n_host_failover",
+    n_host_failover = statistics->Register(name + ".n_host_failover",
         "Number of host failovers");
   }
 };  // Counters
@@ -119,6 +120,12 @@ struct JobInfo {
   bool probe_hosts;
   bool head_request;
   bool follow_redirects;
+  pid_t pid;
+  uid_t uid;
+  gid_t gid;
+  char *cred_fname;  // TODO(bbockelm): This is a fallback method -
+                     // can we eliminate?
+  void *cred_data;  // Per-transfer credential data
   Destination destination;
   struct {
     size_t size;
@@ -131,6 +138,10 @@ struct JobInfo {
   const shash::Any *expected_hash;
   const std::string *extra_info;
 
+  // Allow byte ranges to be specified.
+  off_t range_offset;
+  off_t range_size;
+
   // Default initialization of fields
   void Init() {
     url = NULL;
@@ -138,6 +149,11 @@ struct JobInfo {
     probe_hosts = false;
     head_request = false;
     follow_redirects = false;
+    pid = -1;
+    uid = -1;
+    gid = -1;
+    cred_fname = NULL;
+    cred_data = NULL;
     destination = kDestinationNone;
     destination_mem.size = destination_mem.pos = 0;
     destination_mem.data = NULL;
@@ -156,6 +172,10 @@ struct JobInfo {
     error_code = kFailOther;
     num_used_proxies = num_used_hosts = num_retries = 0;
     backoff_ms = 0;
+
+    range_offset = -1;
+    range_size = -1;
+    http_code = -1;
   }
 
   // One constructor per destination + head request
@@ -211,6 +231,7 @@ struct JobInfo {
   }
 
   ~JobInfo() {
+    delete cred_fname;
     if (wait_at[0] >= 0) {
       close(wait_at[0]);
       close(wait_at[1]);
@@ -227,6 +248,7 @@ struct JobInfo {
   std::string proxy;
   bool nocache;
   Failures error_code;
+  int http_code;
   unsigned char num_used_proxies;
   unsigned char num_used_hosts;
   unsigned char num_retries;
@@ -307,25 +329,38 @@ class DownloadManager {
    */
   static const unsigned kMaxMemSize;
 
+  static const unsigned kDnsDefaultRetries = 1;
+  static const unsigned kDnsDefaultTimeoutMs = 3000;
+
   DownloadManager();
   ~DownloadManager();
 
+  static int ParseHttpCode(const char digits[3]);
+
   void Init(const unsigned max_pool_handles, const bool use_system_proxy,
-      perf::Statistics * statistics);
+      perf::Statistics * statistics, const std::string &name = "download");
   void Fini();
   void Spawn();
   Failures Fetch(JobInfo *info);
 
   void SetDnsServer(const std::string &address);
-  void SetDnsParameters(const unsigned retries, const unsigned timeout_sec);
+  void SetDnsParameters(const unsigned retries, const unsigned timeout_ms);
+  void SetIpPreference(const dns::IpPreference preference);
   void SetTimeout(const unsigned seconds_proxy, const unsigned seconds_direct);
   void GetTimeout(unsigned *seconds_proxy, unsigned *seconds_direct);
   void SetLowSpeedLimit(const unsigned low_speed_limit);
   void SetHostChain(const std::string &host_list);
+  void SetHostChain(const std::vector<std::string> &host_list);
   void GetHostInfo(std::vector<std::string> *host_chain,
                    std::vector<int> *rtt, unsigned *current_host);
   void ProbeHosts();
   bool ProbeGeo();
+    // Sort list of servers using the Geo API.  If the output_order
+    // vector is NULL, then the servers vector input is itself sorted.
+    // If it is non-NULL, then servers is left unchanged and the zero-based
+    // ordering is stored into output_order.
+  bool GeoSortServers(std::vector<std::string> *servers,
+                      std::vector<uint64_t>    *output_order = NULL);
   void SwitchHost();
   void SetProxyChain(const std::string &proxy_list,
                      const std::string &fallback_proxy_list,
@@ -445,7 +480,12 @@ class DownloadManager {
   /**
    * Used to resolve proxy addresses (host addresses are resolved by the proxy).
    */
-  dns::NormalResolver *resolver;
+  dns::NormalResolver *resolver_;
+
+  /**
+   * If a proxy has IPv4 and IPv6 addresses, which one to prefer
+   */
+  dns::IpPreference opt_ip_preference_;
 
   /**
    * Used to replace @proxy@ in the Geo-API calls to order Stratum 1 servers,

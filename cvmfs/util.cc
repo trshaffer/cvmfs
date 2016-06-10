@@ -113,6 +113,27 @@ string MakeCanonicalPath(const string &path) {
 
 
 /**
+ * Return both the file and directory name for a given path.
+ *
+ * NOTE: If only a filename is given, the directory is returned as "."
+ */
+void SplitPath(
+  const std::string &path,
+  std::string *dirname,
+  std::string *filename)
+{
+  size_t dir_sep = path.rfind('/');
+  if (dir_sep != std::string::npos) {
+    *dirname = path.substr(0, dir_sep);
+    *filename = path.substr(dir_sep+1);
+  } else {
+    *dirname = ".";
+    *filename = path;
+  }
+}
+
+
+/**
  * Gets the directory part of a path.
  */
 string GetParentPath(const string &path) {
@@ -283,7 +304,10 @@ void MakePipe(int pipe_fd[2]) {
  * Writes to a pipe should always succeed.
  */
 void WritePipe(int fd, const void *buf, size_t nbyte) {
-  int num_bytes = write(fd, buf, nbyte);
+  int num_bytes;
+  do {
+    num_bytes = write(fd, buf, nbyte);
+  } while ((num_bytes < 0) && (errno == EINTR));
   assert((num_bytes >= 0) && (static_cast<size_t>(num_bytes) == nbyte));
 }
 
@@ -292,7 +316,10 @@ void WritePipe(int fd, const void *buf, size_t nbyte) {
  * Reads from a pipe should always succeed.
  */
 void ReadPipe(int fd, void *buf, size_t nbyte) {
-  int num_bytes = read(fd, buf, nbyte);
+  int num_bytes;
+  do {
+    num_bytes = read(fd, buf, nbyte);
+  } while ((num_bytes < 0) && (errno == EINTR));
   assert((num_bytes >= 0) && (static_cast<size_t>(num_bytes) == nbyte));
 }
 
@@ -304,6 +331,8 @@ void ReadHalfPipe(int fd, void *buf, size_t nbyte) {
   int num_bytes;
   do {
     num_bytes = read(fd, buf, nbyte);
+    if ((num_bytes < 0) && (errno == EINTR))
+      continue;
   } while (num_bytes == 0);
   assert((num_bytes >= 0) && (static_cast<size_t>(num_bytes) == nbyte));
 }
@@ -434,26 +463,47 @@ bool SymlinkExists(const string &path) {
 
 
 /**
+ * Equivalent of `ln -sf $src $dest`
+ */
+bool SymlinkForced(const std::string &src, const std::string &dest) {
+  int retval = unlink(dest.c_str());
+  if ((retval != 0) && (errno != ENOENT))
+    return false;
+  retval = symlink(src.c_str(), dest.c_str());
+  return retval == 0;
+}
+
+
+/**
  * The mkdir -p command.  Additionally checks if the directory is writable
  * if it exists.
  */
-bool MkdirDeep(const std::string &path, const mode_t mode) {
+bool MkdirDeep(
+  const std::string &path,
+  const mode_t mode,
+  bool verify_writable)
+{
   if (path == "") return false;
 
   int retval = mkdir(path.c_str(), mode);
   if (retval == 0) return true;
 
-  if ((errno == ENOENT) && (MkdirDeep(GetParentPath(path), mode))) {
-    return MkdirDeep(path, mode);
+  if ((errno == ENOENT) &&
+      (MkdirDeep(GetParentPath(path), mode, verify_writable)))
+  {
+    return MkdirDeep(path, mode, verify_writable);
   }
 
   if (errno == EEXIST) {
     platform_stat64 info;
     if ((platform_stat(path.c_str(), &info) == 0) && S_ISDIR(info.st_mode)) {
-      // Check writability
-      retval = utimes(path.c_str(), NULL);
-      if (retval == 0)
+      if (verify_writable) {
+        retval = utimes(path.c_str(), NULL);
+        if (retval == 0)
+          return true;
+      } else {
         return true;
+      }
     }
   }
 
@@ -468,20 +518,20 @@ bool MakeCacheDirectories(const string &path, const mode_t mode) {
   const string canonical_path = MakeCanonicalPath(path);
 
   string this_path = canonical_path + "/quarantaine";
-  if (!MkdirDeep(this_path, mode)) return false;
+  if (!MkdirDeep(this_path, mode, false)) return false;
 
   this_path = canonical_path + "/ff";
 
   platform_stat64 stat_info;
   if (platform_stat(this_path.c_str(), &stat_info) != 0) {
     this_path = canonical_path + "/txn";
-    if (!MkdirDeep(this_path, mode))
+    if (!MkdirDeep(this_path, mode, false))
       return false;
     for (int i = 0; i <= 0xff; i++) {
       char hex[3];
       snprintf(hex, sizeof(hex), "%02x", i);
       this_path = canonical_path + "/" + string(hex);
-      if (!MkdirDeep(this_path, mode))
+      if (!MkdirDeep(this_path, mode, false))
         return false;
     }
   }
@@ -879,6 +929,34 @@ uint64_t String2Uint64(const string &value) {
 }
 
 
+/**
+ * Parse a string into a a uint64_t.
+ *
+ * Unlike String2Uint64, this:
+ *   - Checks to make sure the full string is parsed
+ *   - Can indicate an error occurred.
+ *
+ * If an error occurs, this returns false and sets errno appropriately.
+ */
+bool String2Uint64Parse(const std::string &value, uint64_t *result) {
+  char *endptr = NULL;
+  errno = 0;
+  long long myval = strtoll(value.c_str(), &endptr, 10);  // NOLINT
+  if ((value.size() == 0) || (endptr != (value.c_str() + value.size())) ||
+      (myval < 0))
+  {
+    errno = EINVAL;
+    return false;
+  }
+  if (errno) {
+    return false;
+  }
+  if (result) {
+    *result = myval;
+  }
+  return true;
+}
+
 void String2Uint64Pair(const string &value, uint64_t *a, uint64_t *b) {
   sscanf(value.c_str(), "%"PRIu64" %"PRIu64, a, b);
 }
@@ -1044,7 +1122,12 @@ string GetLineMem(const char *text, const int text_size) {
 bool GetLineFile(FILE *f, std::string *line) {
   int retval;
   line->clear();
-  while ((retval = fgetc(f)) != EOF) {
+  while (true) {
+    retval = fgetc(f);
+    if (ferror(f) && (errno == EINTR)) {
+      clearerr(f);
+      continue;
+    } else if (retval == EOF) {break;}
     char c = retval;
     if (c == '\n')
       break;
@@ -1058,7 +1141,11 @@ bool GetLineFd(const int fd, std::string *line) {
   int retval;
   char c;
   line->clear();
-  while ((retval = read(fd, &c, 1)) == 1) {
+  while (true) {
+    retval = read(fd, &c, 1);
+    if (retval == 0) {break;}
+    if ((retval == -1) && (errno == EINTR)) {continue;}
+    if (retval == -1) {break;}
     if (c == '\n')
       break;
     line->push_back(c);
@@ -1446,6 +1533,68 @@ void SafeSleepMs(const unsigned ms) {
   wait_for.tv_sec = ms / 1000;
   wait_for.tv_usec = (ms % 1000) * 1000;
   select(0, NULL, NULL, NULL, &wait_for);
+}
+
+
+/**
+ * Deal with EINTR and partial writes.
+ */
+bool SafeWrite(int fd, const void *buf, size_t nbyte) {
+  while (nbyte) {
+    ssize_t retval = write(fd, buf, nbyte);
+    if (retval < 0) {
+      if (errno == EINTR)
+        continue;
+      return false;
+    }
+    assert(static_cast<size_t>(retval) <= nbyte);
+    buf = reinterpret_cast<const char *>(buf) + retval;
+    nbyte -= retval;
+  }
+  return true;
+}
+
+
+/**
+ * Deal with EINTR and partial reads.
+ */
+ssize_t SafeRead(int fd, void *buf, size_t nbyte) {
+  ssize_t total_bytes = 0;
+  while (nbyte) {
+    ssize_t retval = read(fd, buf, nbyte);
+    if (retval < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    } else if (retval == 0) {
+      return total_bytes;
+    }
+    assert(static_cast<size_t>(retval) <= nbyte);
+    buf = reinterpret_cast<char *>(buf) + retval;
+    nbyte -= retval;
+    total_bytes += retval;
+  }
+  return total_bytes;
+}
+
+
+/**
+ * Pull file contents into a string
+ */
+bool SafeReadToString(int fd, std::string *final_result) {
+  if (!final_result) {return false;}
+
+  std::string tmp_result;
+  static const int buf_size = 4096;
+  char buf[4096];
+  ssize_t total_bytes = -1;
+  do {
+    total_bytes = SafeRead(fd, buf, buf_size);
+    if (total_bytes < 0) {return false;}
+    tmp_result.append(buf, total_bytes);
+  } while (total_bytes == buf_size);
+  final_result->swap(tmp_result);
+  return true;
 }
 
 

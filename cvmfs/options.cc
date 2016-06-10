@@ -215,7 +215,7 @@ bool OptionsManager::HasConfigRepository(const string &fqrn,
 
   string config_repository;
   if (GetValue("CVMFS_CONFIG_REPOSITORY", &config_repository)) {
-    if (config_repository == fqrn)
+    if (config_repository.empty() || (config_repository == fqrn))
       return false;
     sanitizer::RepositorySanitizer repository_sanitizer;
     if (!repository_sanitizer.IsValid(config_repository)) {
@@ -240,6 +240,10 @@ void OptionsManager::ParseDefault(const string &fqrn) {
   for (unsigned i = 0; i < dist_defaults.size(); ++i) {
     ParsePath(dist_defaults[i], false);
   }
+  string external_config_path;
+  // This change breaks a number of integration tests.  Move to version 2.3.
+  // if ((fqrn != "") && HasConfigRepository(fqrn, &external_config_path))
+  //  ParsePath(external_config_path + "default.conf", true);
   ParsePath("/etc/cvmfs/default.local", false);
 
   if (fqrn != "") {
@@ -249,7 +253,6 @@ void OptionsManager::ParseDefault(const string &fqrn) {
     tokens.erase(tokens.begin());
     domain = JoinStrings(tokens, ".");
 
-    string external_config_path;
     if (HasConfigRepository(fqrn, &external_config_path))
       ParsePath(external_config_path + "domain.d/" + domain + ".conf", true);
     ParsePath("/etc/cvmfs/domain.d/" + domain + ".conf", false);
@@ -329,34 +332,6 @@ string OptionsManager::Dump() {
               "    # from " + source + "\n";
   }
   return result;
-}
-
-
-bool OptionsManager::ParseUIntMap(const string &path,
-    map<uint64_t, uint64_t> *map) {
-  assert(map);
-
-  FILE *fmap = fopen(path.c_str(), "r");
-  if (!fmap)
-    return false;
-
-  string line;
-  while (GetLineFile(fmap, &line)) {
-    line = Trim(line);
-    if (line.empty() || line[0] == '#') {
-      continue;
-    }
-    vector<string> components = SplitString(line, ' ');
-    if (components.size() != 2) {
-      fclose(fmap);
-      return false;
-    }
-    uint64_t from = String2Uint64(components[0]);
-    uint64_t to = String2Uint64(components[1]);
-    map->insert(pair<uint64_t, uint64_t>(from, to));
-  }
-  fclose(fmap);
-  return true;
 }
 
 #ifdef CVMFS_NAMESPACE_GUARD

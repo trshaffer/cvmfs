@@ -74,7 +74,7 @@ class UploadCallbacks {
 template <class UploadersT>
 class T_Uploaders : public FileSandbox {
  private:
-  static const std::string sandbox_path;
+  static const char sandbox_path[];
   static const std::string dest_dir;
   static const std::string tmp_dir;
   std::string repo_alias;
@@ -95,7 +95,8 @@ class T_Uploaders : public FileSandbox {
   typedef std::vector<CharBuffer*>                       Buffers;
   typedef std::vector<std::pair<Buffers, StreamHandle> > BufferStreams;
 
-  T_Uploaders() : FileSandbox(T_Uploaders::sandbox_path), uploader_(NULL) {}
+  T_Uploaders() : FileSandbox(string(T_Uploaders::sandbox_path)),
+                  uploader_(NULL) {}
 
  protected:
   AbstractUploader *uploader_;
@@ -179,6 +180,7 @@ class T_Uploaders : public FileSandbox {
 
     return SpoolerDefinition(definition,
                              shash::kSha1,
+                             zlib::kZlibDefault,
                              use_file_chunking,
                              min_chunk_size,
                              avg_chunk_size,
@@ -313,6 +315,8 @@ class T_Uploaders : public FileSandbox {
     return retme;
   }
 
+
+  bool IsS3() const;
 
  private:
   void CreateS3Mockup() {
@@ -523,7 +527,7 @@ class T_Uploaders : public FileSandbox {
         "CVMFS_S3_BUCKET=testbucket\n"
         "CVMFS_S3_MAX_NUMBER_OF_PARALLEL_CONNECTIONS=" +
         StringifyInt(parallel_connections) + "\n"
-        "CVMFS_S3_HOST=localhost\n"
+        "CVMFS_S3_HOST=127.0.0.1\n"
         "CVMFS_S3_PORT=" + StringifyInt(CVMFS_S3_TEST_MOCKUP_SERVER_PORT);
 
     fprintf(s3_conf, "%s\n", conf_str.c_str());
@@ -576,19 +580,29 @@ class T_Uploaders : public FileSandbox {
   }
 };
 
+template <typename T>
+bool T_Uploaders<T>::IsS3() const {
+  return false;
+}
+
+template <>
+bool T_Uploaders<S3Uploader>::IsS3() const {
+  return true;
+}
+
 template <class UploadersT>
 atomic_int64 T_Uploaders<UploadersT>::gSeed = 0;
 
 template <class UploadersT>
-const std::string T_Uploaders<UploadersT>::sandbox_path = "./cvmfs_ut_uploader";
+const char T_Uploaders<UploadersT>::sandbox_path[] = "./cvmfs_ut_uploader";
 
 template <class UploadersT>
 const std::string T_Uploaders<UploadersT>::tmp_dir =
-    T_Uploaders::sandbox_path + "/tmp";
+    string(T_Uploaders::sandbox_path) + "/tmp";
 
 template <class UploadersT>
 const std::string T_Uploaders<UploadersT>::dest_dir =
-    T_Uploaders::sandbox_path + "/dest";
+    string(T_Uploaders::sandbox_path) + "/dest";
 
 typedef testing::Types<S3Uploader, LocalUploader> UploadTypes;
 TYPED_TEST_CASE(T_Uploaders, UploadTypes);
@@ -912,6 +926,44 @@ TYPED_TEST(T_Uploaders, MultipleStreamedUploadSlow) {
   }
 
   TestFixture::FreeBufferStreams(&streams);
+}
+
+
+//------------------------------------------------------------------------------
+
+
+TYPED_TEST(T_Uploaders, PlaceBootstrappingShortcut) {
+  if (TestFixture::IsS3()) {
+    SUCCEED();  // TODO(rmeusel): enable this as soon as the feature is
+    return;     //                implemented for the S3Uploader
+  }
+
+  const std::string big_file_path = TestFixture::GetBigFile();
+
+  shash::Any digest(shash::kSha1);
+  ASSERT_TRUE(shash::HashFile(big_file_path, &digest));
+
+  const std::string dest_name = "data/" + digest.MakePath();
+
+  this->uploader_->Upload(big_file_path,
+                          dest_name,
+                          AbstractUploader::MakeClosure(
+                              &UploadCallbacks::SimpleUploadClosure,
+                              &this->delegate_,
+                              UploaderResults(0, big_file_path)));
+
+  this->uploader_->WaitForUpload();
+  EXPECT_TRUE(TestFixture::CheckFile(dest_name));
+
+  EXPECT_EQ(1u, this->delegate_.simple_upload_invocations);
+  TestFixture::CompareFileContents(big_file_path,
+                                   TestFixture::AbsoluteDestinationPath(
+                                       dest_name));
+
+  ASSERT_TRUE(this->uploader_->PlaceBootstrappingShortcut(digest));
+  TestFixture::CompareFileContents(big_file_path,
+                                   TestFixture::AbsoluteDestinationPath(
+                                       digest.MakeAlternativePath()));
 }
 
 }  // namespace upload

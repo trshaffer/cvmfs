@@ -18,6 +18,7 @@
 
 #include "atomic.h"
 #include "bigvector.h"
+#include "compression.h"
 #include "hash.h"
 #include "shortstring.h"
 #include "smallhash.h"
@@ -51,13 +52,22 @@ typedef BigVector<FileChunk> FileChunkList;
 
 struct FileChunkReflist {
   FileChunkReflist() : list(NULL) { }
-  FileChunkReflist(FileChunkList *l, const PathString &p) :
-    list(l), path(p) { }
+  FileChunkReflist(
+    FileChunkList *l,
+    const PathString &p,
+    zlib::Algorithms alg,
+    bool external)
+    : list(l)
+    , path(p)
+    , compression_alg(alg)
+    , external_data(external) { }
 
   unsigned FindChunkIdx(const uint64_t offset);
 
   FileChunkList *list;
   PathString path;
+  zlib::Algorithms compression_alg;
+  bool external_data;
 };
 
 
@@ -96,10 +106,15 @@ struct ChunkTables {
     assert(retval == 0);
   }
 
-  static const unsigned kVersion = 2;
+  // Version 2 --> 4: add handle2uniqino
+  static const unsigned kVersion = 4;
 
   int version;
   static const unsigned kNumHandleLocks = 128;
+  // Versions < 4 of ChunkTables didn't have this map.  Therefore, after a
+  // hot patch a handle can be missing from this map.  In this case, the fuse
+  // module falls back to the inode passed by the kernel.
+  SmallHashDynamic<uint64_t, uint64_t> handle2uniqino;
   SmallHashDynamic<uint64_t, ChunkFd> handle2fd;
   // The file descriptors attached to handles need to be locked.
   // Using a hash map to survive with a small, fixed number of locks

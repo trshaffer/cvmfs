@@ -82,7 +82,6 @@ class TestSink : public cvmfs::Sink {
 //------------------------------------------------------------------------------
 
 
-// A placeholder test for future unit testing of the download module
 TEST_F(T_Download, File) {
   string dest_path;
   FILE *fdest = CreateTemporaryFile(&dest_path);
@@ -94,6 +93,28 @@ TEST_F(T_Download, File) {
   download_mgr.Fetch(&info);
   EXPECT_EQ(info.error_code, kFailOk);
   fclose(fdest);
+}
+
+
+TEST_F(T_Download, Multiple) {
+  string dest_path;
+  FILE *fdest = CreateTemporaryFile(&dest_path);
+  ASSERT_TRUE(fdest != NULL);
+  UnlinkGuard unlink_guard(dest_path);
+
+  DownloadManager second_mgr;
+  second_mgr.Init(8, false, /* use_system_proxy */ &statistics, "second");
+
+  JobInfo info(&foo_url, false /* compressed */, false /* probe hosts */,
+               fdest,  NULL);
+  JobInfo info2(&foo_url, false /* compressed */, false /* probe hosts */,
+                fdest,  NULL);
+  download_mgr.Fetch(&info);
+  second_mgr.Fetch(&info2);
+  EXPECT_EQ(info.error_code, kFailOk);
+  EXPECT_EQ(info2.error_code, kFailOk);
+  fclose(fdest);
+  second_mgr.Fini();
 }
 
 
@@ -236,6 +257,21 @@ TEST_F(T_Download, ValidateGeoReply) {
   EXPECT_EQ(geo_order[1], 2U);
   EXPECT_EQ(geo_order[2], 0U);
   EXPECT_EQ(geo_order[3], 1U);
+}
+
+
+TEST_F(T_Download, ParseHttpCode) {
+  char digits[3];
+  digits[0] = '0';  digits[1] = '0';  digits[2] = 'a';
+  EXPECT_EQ(-1, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '0';  digits[1] = '0';  digits[2] = '0';
+  EXPECT_EQ(0, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '0';  digits[1] = '0';  digits[2] = '1';
+  EXPECT_EQ(1, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '1';  digits[1] = '0';  digits[2] = '1';
+  EXPECT_EQ(101, DownloadManager::ParseHttpCode(digits));
+  digits[0] = '9';  digits[1] = '9';  digits[2] = '9';
+  EXPECT_EQ(999, DownloadManager::ParseHttpCode(digits));
 }
 
 }  // namespace download
