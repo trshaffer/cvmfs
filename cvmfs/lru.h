@@ -783,6 +783,11 @@ static inline uint32_t hasher_md5(const shash::Md5 &key) {
   return (uint32_t) *(reinterpret_cast<const uint32_t *>(key.digest) + 1);
 }
 
+static inline uint32_t hasher_any(const shash::Any &key) {
+  //TODO use hasher_md5
+  return 0;
+}
+
 static inline uint32_t hasher_inode(const fuse_ino_t &inode) {
   return MurmurHash2(&inode, sizeof(inode), 0x07387a4f);
 }
