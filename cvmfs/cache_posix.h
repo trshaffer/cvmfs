@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "atomic.h"
-#include "cache.h"
 #include "backoff.h"
+#include "cache.h"
 #include "catalog_mgr.h"
 #include "file_chunk.h"
 #include "gtest/gtest_prod.h"

@@ -14,8 +14,8 @@
 
 #include <dlfcn.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <sys/select.h>
 #include <sys/time.h>
