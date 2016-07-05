@@ -4,9 +4,9 @@
 #include "cvmfs_config.h"
 #include "cache_ram.h"
 
-#include <assert.h>
+#include <cassert>
 #include <errno.h>
-#include <string.h>
+#include <cstring>
 
 #include <algorithm>
 #include <new>
