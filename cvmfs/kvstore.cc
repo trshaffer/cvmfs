@@ -98,7 +98,9 @@ bool MemoryKvStore::Commit(
   WriteLockGuard guard(rwlock_);
   MemoryBuffer mem;
   if (entries_.Lookup(id, &mem)) {
-    if (!DoDelete(id)) return false;
+    if (mem.refcount != buf.refcount) return false;
+    if (mem.object_type != buf.object_type) return false;
+    used_bytes_ -= mem.size;
   }
   entries_.Insert(id, buf);
   used_bytes_ += buf.size;
