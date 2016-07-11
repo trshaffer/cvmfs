@@ -34,6 +34,7 @@
 #include "backoff.h"
 #include "cache.h"
 #include "cache_posix.h"
+#include "cache_ram.h"
 #include "catalog.h"
 #include "catalog_mgr_client.h"
 #include "download.h"
@@ -156,10 +157,16 @@ FileSystem *FileSystem::Create(const FileSystem::FileSystemInfo &fs_info) {
  * Initialize the cache directory and start the quota manager.
  */
 bool FileSystem::CreateCache() {
+/*
   cache_mgr_ = cache::PosixCacheManager::Create(
                  cache_dir_,
                  cache_mode_ & FileSystem::kCacheAlien,
                  cache_mode_ & FileSystem::kCacheNoRename);
+*/
+  cache_mgr_ = new cache::RamCacheManager(
+    quota_limit_,
+    1024*3*8,
+    statistics_);
   if (cache_mgr_ == NULL) {
     boot_error_ = "Failed to setup cache in " + cache_dir_ + ": " +
                   strerror(errno);
@@ -167,6 +174,7 @@ bool FileSystem::CreateCache() {
     return false;
   }
   // Sentinel file for future use
+
   CreateFile(cache_dir_ + "/.cvmfscache", 0600);
 
   if (cache_mode_ & FileSystem::kCacheManaged) {
@@ -179,7 +187,7 @@ bool FileSystem::CreateCache() {
 
   // Create or load from cache, used as id by the download manager when the
   // proxy template is replaced
-  uuid_cache_ = cvmfs::Uuid::Create(cache_dir_ + "/uuid");
+  uuid_cache_ = cvmfs::Uuid::Create("");
   if (uuid_cache_ == NULL) {
     boot_error_ = "failed to load/store uuid";
     boot_status_ = loader::kFailCacheDir;
@@ -514,6 +522,7 @@ bool FileSystem::SetupNfsMaps() {
 
 
 bool FileSystem::SetupQuotaMgmt() {
+/*
   assert(quota_limit_ >= 0);
   int64_t quota_threshold = quota_limit_ / 2;
   PosixQuotaManager *quota_mgr;
@@ -557,6 +566,11 @@ bool FileSystem::SetupQuotaMgmt() {
       return false;
     }
   }
+
+  int retval = cache_mgr_->AcquireQuotaManager(quota_mgr);
+*/
+
+  NoopQuotaManager *quota_mgr = new NoopQuotaManager();
 
   int retval = cache_mgr_->AcquireQuotaManager(quota_mgr);
   assert(retval);

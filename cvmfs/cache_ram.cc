@@ -195,9 +195,11 @@ int RamCacheManager::Reset(void *txn) {
 int RamCacheManager::OpenFromTxn(void *txn) {
   WriteLockGuard guard(rwlock_);
   Transaction *transaction = reinterpret_cast<Transaction *>(txn);
-  int64_t retval = CommitToKvStore(transaction);
+  int64_t retval = CommitToKvStore(transaction, true);
   if (retval < 0) return retval;
-  return DoOpen(transaction->id);
+  int fd = DoOpen(transaction->id);
+  if (fd < 0) return fd;
+  return fd;
 }
 
 
@@ -212,11 +214,11 @@ int RamCacheManager::AbortTxn(void *txn) {
 int RamCacheManager::CommitTxn(void *txn) {
   WriteLockGuard guard(rwlock_);
   Transaction *transaction = reinterpret_cast<Transaction *>(txn);
-  return CommitToKvStore(transaction);
+  return CommitToKvStore(transaction, false);
 }
 
 
-int64_t RamCacheManager::CommitToKvStore(Transaction *transaction) {
+int64_t RamCacheManager::CommitToKvStore(Transaction *transaction, bool opened) {
   kvstore::MemoryBuffer buf;
   buf.address = transaction->buffer;
   kvstore::MemoryKvStore *store;
@@ -240,6 +242,7 @@ int64_t RamCacheManager::CommitToKvStore(Transaction *transaction) {
   } else {
     buf.refcount = 0;
   }
+  if (opened) ++buf.refcount;
 
   int64_t regular_size = regular_entries_.GetUsed();
   int64_t volatile_size = volatile_entries_.GetUsed();

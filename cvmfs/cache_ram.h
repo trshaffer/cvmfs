@@ -190,7 +190,7 @@ class RamCacheManager : public CacheManager {
   }
 
   int AddFd(const ReadOnlyFd &fd);
-  int64_t CommitToKvStore(Transaction *transaction);
+  int64_t CommitToKvStore(Transaction *transaction, bool opened);
   virtual int DoOpen(const shash::Any &id);
 
   uint64_t max_size_;
